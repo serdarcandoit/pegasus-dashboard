@@ -2,12 +2,6 @@ import streamlit as st
 import yfinance as yf
 import plotly.graph_objects as go
 import requests
-
-# Yahoo Finance Rate Limit (429) sorununu çözmek için custom session (Özellikle Streamlit Cloud için)
-session = requests.Session()
-session.headers.update({
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-})
 # Sayfa ayarları
 st.set_page_config(page_title="Pegasus (PGSUS) Dashboard", page_icon="✈️", layout="wide")
 
@@ -45,7 +39,7 @@ with col2:
 
 @st.cache_data(ttl=60) # Fiyat verisi 60 sn
 def load_data(ticker, interval):
-    stock = yf.Ticker(ticker, session=session)
+    stock = yf.Ticker(ticker)
     
     if interval == "1y":
         hist = stock.history(period="max", interval="1mo")
@@ -63,7 +57,7 @@ def load_data(ticker, interval):
 
 @st.cache_data(ttl=3600) # Temel analiz verileri yavaş değiştiği için 1 saat önbellek
 def load_info(ticker):
-    stock = yf.Ticker(ticker, session=session)
+    stock = yf.Ticker(ticker)
     info = stock.info
     
     # Yahoo Finance'in kendi sağladığı hareketli ortalamalar BIST için bazen hatalı/gecikmeli olabiliyor.
