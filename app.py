@@ -120,9 +120,9 @@ def load_info(ticker):
 
 
 try:
-    with st.spinner("Veriler yükleniyor..."):
-        hist, calc_50_ma, calc_200_ma = load_all_data(TICKER, selected_interval)
-        info = load_info(TICKER)
+    # Cached fonksiyonları spinner dışında çağır (Streamlit Cloud uyumluluğu)
+    hist, calc_50_ma, calc_200_ma = load_all_data(TICKER, selected_interval)
+    info = load_info(TICKER)
     
     if not hist.empty:
         # Son gün kapanış ve bir önceki gün kapanış fiyatlarını al
