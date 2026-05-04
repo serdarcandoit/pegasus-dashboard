@@ -50,7 +50,6 @@ def fetch_with_retry(func, max_retries=3, initial_wait=5):
             if "too many requests" in error_msg or "rate limit" in error_msg or "429" in error_msg:
                 if attempt < max_retries - 1:
                     wait_time = initial_wait * (2 ** attempt)  # Exponential backoff: 5s, 10s, 20s
-                    st.toast(f"⏳ Yahoo Finance rate limit — {wait_time} saniye bekleniyor... (Deneme {attempt + 2}/{max_retries})")
                     time.sleep(wait_time)
                 else:
                     raise  # Son denemede de başarısızsa hatayı fırlat
