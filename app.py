@@ -1,7 +1,8 @@
 import streamlit as st
 import yfinance as yf
 import plotly.graph_objects as go
-import requests
+import time
+
 # Sayfa ayarları
 st.set_page_config(page_title="Pegasus (PGSUS) Dashboard", page_icon="✈️", layout="wide")
 
@@ -37,46 +38,91 @@ with col2:
     except AttributeError:
         chart_type = st.radio("Tip", ["🕯️ Mum", "📈 Çizgi"], horizontal=True, label_visibility="collapsed")
 
-@st.cache_data(ttl=60) # Fiyat verisi 60 sn
-def load_data(ticker, interval):
-    stock = yf.Ticker(ticker)
-    
-    if interval == "1y":
-        hist = stock.history(period="max", interval="1mo")
-        if not hist.empty:
-            hist = hist.resample('YE').agg({
-                'Open': 'first', 
-                'High': 'max', 
-                'Low': 'min', 
-                'Close': 'last'
-            }).dropna()
-    else:
-        hist = stock.history(period="max", interval=interval)
-        
-    return hist
 
-@st.cache_data(ttl=3600) # Temel analiz verileri yavaş değiştiği için 1 saat önbellek
+def fetch_with_retry(func, max_retries=3, initial_wait=5):
+    """Yahoo Finance API çağrılarını rate limit hatalarına karşı retry mekanizması ile yapar."""
+    for attempt in range(max_retries):
+        try:
+            return func()
+        except Exception as e:
+            error_msg = str(e).lower()
+            # Rate limit veya Too Many Requests hatası kontrolü
+            if "too many requests" in error_msg or "rate limit" in error_msg or "429" in error_msg:
+                if attempt < max_retries - 1:
+                    wait_time = initial_wait * (2 ** attempt)  # Exponential backoff: 5s, 10s, 20s
+                    st.toast(f"⏳ Yahoo Finance rate limit — {wait_time} saniye bekleniyor... (Deneme {attempt + 2}/{max_retries})")
+                    time.sleep(wait_time)
+                else:
+                    raise  # Son denemede de başarısızsa hatayı fırlat
+            else:
+                raise  # Rate limit dışı hatalar direkt fırlatılır
+
+
+@st.cache_data(ttl=300)  # Fiyat verisi 5 dakika önbellek (rate limit'e takılmamak için artırıldı)
+def load_all_data(ticker, interval):
+    """Tek bir fonksiyonla hem grafik verisini hem hareketli ortalamaları çeker.
+    Bu sayede Yahoo Finance'e giden istek sayısı minimuma iner."""
+    stock = yf.Ticker(ticker)
+
+    # 1) Grafik için ana veri
+    def _fetch_hist():
+        if interval == "1y":
+            h = stock.history(period="max", interval="1mo")
+            if not h.empty:
+                h = h.resample('YE').agg({
+                    'Open': 'first',
+                    'High': 'max',
+                    'Low': 'min',
+                    'Close': 'last'
+                }).dropna()
+            return h
+        else:
+            return stock.history(period="max", interval=interval)
+
+    hist = fetch_with_retry(_fetch_hist)
+
+    # 2) Hareketli ortalamalar için günlük veri — sadece ana veri günlük DEĞİLSE ayrı çek
+    #    Eğer zaten günlük veri çektikse, aynı veriyi kullan
+    calc_50_ma = None
+    calc_200_ma = None
+
+    if interval == "1d" and not hist.empty:
+        # Zaten günlük veri elimizde, ekstra istek yok
+        if len(hist) >= 50:
+            calc_50_ma = hist['Close'].rolling(window=50).mean().iloc[-1]
+        if len(hist) >= 200:
+            calc_200_ma = hist['Close'].rolling(window=200).mean().iloc[-1]
+    else:
+        # Farklı interval seçilmişse, günlük veriyi ayrıca çekmemiz gerekiyor
+        try:
+            def _fetch_daily():
+                return stock.history(period="2y", interval="1d")
+            
+            hist_daily = fetch_with_retry(_fetch_daily)
+            if not hist_daily.empty:
+                if len(hist_daily) >= 50:
+                    calc_50_ma = hist_daily['Close'].rolling(window=50).mean().iloc[-1]
+                if len(hist_daily) >= 200:
+                    calc_200_ma = hist_daily['Close'].rolling(window=200).mean().iloc[-1]
+        except Exception:
+            pass  # MA hesaplanamasa da grafik gösterilsin
+
+    return hist, calc_50_ma, calc_200_ma
+
+
+@st.cache_data(ttl=21600)  # Temel analiz verileri yavaş değiştiği için 6 saat önbellek
 def load_info(ticker):
     stock = yf.Ticker(ticker)
-    info = stock.info
     
-    # Yahoo Finance'in kendi sağladığı hareketli ortalamalar BIST için bazen hatalı/gecikmeli olabiliyor.
-    # Bu yüzden en güncel günlük kapanışlardan hareketli ortalamaları (MA) kendimiz hesaplıyoruz.
-    try:
-        hist_daily = stock.history(period="2y", interval="1d")
-        if not hist_daily.empty:
-            if len(hist_daily) >= 50:
-                info['calc_50_ma'] = hist_daily['Close'].rolling(window=50).mean().iloc[-1]
-            if len(hist_daily) >= 200:
-                info['calc_200_ma'] = hist_daily['Close'].rolling(window=200).mean().iloc[-1]
-    except Exception:
-        pass
-        
-    return info
+    def _fetch_info():
+        return stock.info
+    
+    return fetch_with_retry(_fetch_info)
+
 
 try:
     with st.spinner("Veriler yükleniyor..."):
-        hist = load_data(TICKER, selected_interval)
+        hist, calc_50_ma, calc_200_ma = load_all_data(TICKER, selected_interval)
         info = load_info(TICKER)
     
     if not hist.empty:
@@ -158,9 +204,9 @@ try:
             mcap = info.get('marketCap')
             mcap_str = f"{mcap / 1_000_000_000:.2f} Milyar ₺" if mcap else "Veri Yok"
             
-            # API'nin verdiği hatalı olabilecek veriler yerine kendi hesapladığımız kesin MA değerlerini alıyoruz
-            ma50 = info.get('calc_50_ma') or info.get('fiftyDayAverage')
-            ma200 = info.get('calc_200_ma') or info.get('twoHundredDayAverage')
+            # Kendi hesapladığımız kesin MA değerlerini kullanıyoruz, yoksa API'nin verdiğini fallback olarak al
+            ma50 = calc_50_ma or info.get('fiftyDayAverage')
+            ma200 = calc_200_ma or info.get('twoHundredDayAverage')
             
             # HTML ve CSS ile çok daha şık, kompakt ve hizalı bir tablo (TradingView sidebar benzeri)
             html_content = f"""
@@ -206,8 +252,8 @@ try:
 <div style="margin-top: 40px; display: flex; gap: 10px; align-items: flex-start; text-align: left; color: #78909c; font-size: 13px; font-style: italic; border-top: 1px dashed #37474f; padding-top: 15px; line-height: 1.5;">
 <span style="font-size: 16px; margin-top: 1px;">ℹ️</span>
 <div>
-Veriler <b>Yahoo Finance</b> üzerinden sağlanmakta olup <b>60 saniyede bir</b> önbelleğe alınmaktadır.<br>
-Güncel fiyatı görmek için 60 saniyenin ardından <b>sayfayı yenileyebilirsiniz.</b>
+Veriler <b>Yahoo Finance</b> üzerinden sağlanmakta olup <b>5 dakikada bir</b> önbelleğe alınmaktadır.<br>
+Güncel fiyatı görmek için 5 dakikanın ardından <b>sayfayı yenileyebilirsiniz.</b>
 </div>
 </div>
 </div>
@@ -218,4 +264,9 @@ Güncel fiyatı görmek için 60 saniyenin ardından <b>sayfayı yenileyebilirsi
         st.warning("Hisse verisi çekilemedi. Lütfen piyasa durumunu ve internet bağlantınızı kontrol edin.")
 
 except Exception as e:
-    st.error(f"Veri çekilirken bir hata oluştu: {e}")
+    error_msg = str(e)
+    if "too many requests" in error_msg.lower() or "rate limit" in error_msg.lower() or "429" in error_msg.lower():
+        st.error("⚠️ Yahoo Finance rate limit'e ulaşıldı. Lütfen 1-2 dakika bekleyip sayfayı yenileyin.")
+        st.info("💡 **İpucu:** Sayfayı çok sık yenilememek bu hatayı önler. Veriler otomatik olarak 5 dakika önbelleğe alınmaktadır.")
+    else:
+        st.error(f"Veri çekilirken bir hata oluştu: {e}")
