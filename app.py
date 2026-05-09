@@ -9,8 +9,135 @@ st.set_page_config(page_title="Pegasus (PGSUS) Dashboard", page_icon="✈️", l
 # Borsa İstanbul için hisse sembolü (Yahoo Finance formatı)
 TICKER = "PGSUS.IS"
 
+# ─── Döviz & Altın Ticker Sembolleri ───
+CURRENCY_TICKERS = {
+    "USD/TRY": {"symbol": "USDTRY=X", "flag": "🇺🇸", "label": "Dolar ($)"},
+    "EUR/TRY": {"symbol": "EURTRY=X", "flag": "🇪🇺", "label": "Euro (€)"},
+    "GBP/TRY": {"symbol": "GBPTRY=X", "flag": "🇬🇧", "label": "Sterlin (£)"},
+    "BIST100": {"symbol": "XU100.IS", "flag": "XU100", "label": "BIST 100"},
+    "BIST30": {"symbol": "XU030.IS", "flag": "XU030", "label": "BIST 30"},
+}
+GOLD_TICKER = "GC=F"  # Altın (USD/ons) — gram TRY'ye çevrilecek
+TROY_OUNCE_GRAM = 31.1035  # 1 troy ons = 31.1035 gram
+
+
+def fetch_with_retry(func, max_retries=3, initial_wait=5):
+    """Yahoo Finance API çağrılarını rate limit hatalarına karşı retry mekanizması ile yapar."""
+    for attempt in range(max_retries):
+        try:
+            return func()
+        except Exception as e:
+            error_msg = str(e).lower()
+            # Rate limit veya Too Many Requests hatası kontrolü
+            if "too many requests" in error_msg or "rate limit" in error_msg or "429" in error_msg:
+                if attempt < max_retries - 1:
+                    wait_time = initial_wait * (2 ** attempt)  # Exponential backoff: 5s, 10s, 20s
+                    st.toast(f"⏳ Yahoo Finance rate limit — {wait_time} saniye bekleniyor... (Deneme {attempt + 2}/{max_retries})")
+                    time.sleep(wait_time)
+                else:
+                    raise  # Son denemede de başarısızsa hatayı fırlat
+            else:
+                raise  # Rate limit dışı hatalar direkt fırlatılır
+
+
+@st.cache_data(ttl=300)
+def load_currency_data():
+    """Döviz kurları (USD, EUR, GBP → TRY) ve gram altın fiyatını çeker."""
+    results = {}
+
+    # Döviz kurlarını çek
+    for key, meta in CURRENCY_TICKERS.items():
+        try:
+            def _fetch(s=meta["symbol"]):
+                t = yf.Ticker(s)
+                h = t.history(period="5d", interval="1d")
+                return h
+            h = fetch_with_retry(_fetch)
+            if not h.empty and len(h) >= 2:
+                current = h['Close'].iloc[-1]
+                previous = h['Close'].iloc[-2]
+                change_pct = ((current - previous) / previous) * 100
+                results[key] = {"price": current, "change": change_pct, **meta}
+            elif not h.empty:
+                current = h['Close'].iloc[-1]
+                results[key] = {"price": current, "change": 0.0, **meta}
+        except Exception:
+            pass
+
+    # Altın (USD/ons) çek ve gram TRY'ye çevir
+    try:
+        def _fetch_gold():
+            t = yf.Ticker(GOLD_TICKER)
+            return t.history(period="5d", interval="1d")
+        h_gold = fetch_with_retry(_fetch_gold)
+
+        usd_try_price = results.get("USD/TRY", {}).get("price")
+
+        if not h_gold.empty and usd_try_price:
+            gold_usd_current = h_gold['Close'].iloc[-1]
+            gold_usd_previous = h_gold['Close'].iloc[-2] if len(h_gold) >= 2 else gold_usd_current
+            gram_try_current = (gold_usd_current * usd_try_price) / TROY_OUNCE_GRAM
+            gram_try_previous = (gold_usd_previous * usd_try_price) / TROY_OUNCE_GRAM
+            change_pct = ((gram_try_current - gram_try_previous) / gram_try_previous) * 100
+            results["GOLD"] = {
+                "price": gram_try_current,
+                "change": change_pct,
+                "flag": "🥇",
+                "label": "Gram Altın (g)",
+            }
+    except Exception:
+        pass
+
+    return results
+
+
+def render_ticker_bar(currency_data):
+    """Döviz ve altın fiyatlarını kayan (sliding) borsa bandı olarak render eder."""
+    items_html = ""
+    
+    if not currency_data:
+        # Veri çekilemezse varsayılan bir yazı göster
+        items_html = f"""
+        <div style="display: inline-flex; align-items: center; gap: 6px; padding: 0 20px;">
+            <span style="color: #90a4ae; font-size: 13px; font-weight: 500;">Döviz ve altın verileri yükleniyor veya API limitine takıldı...</span>
+        </div>
+        """
+    else:
+        for key, data in currency_data.items():
+            price = data["price"]
+            change = data["change"]
+            flag = data["flag"]
+            label = data["label"]
+
+            color = "#26a69a" if change >= 0 else "#ef5350"
+            sign = "+" if change >= 0 else ""
+            arrow = "▲" if change >= 0 else "▼"
+
+            if key == "GOLD":
+                price_str = f"{price:,.2f} ₺"
+            else:
+                price_str = f"{price:.4f} ₺"
+
+            # Satır sonlarını kaldırarak Markdown parser'ın kod bloğu sanmasını önlüyoruz
+            item = f"""<div style="display: inline-flex; align-items: center; gap: 6px; padding: 0 20px; border-right: 1px solid #333;"><span style="font-size: 14px;">{flag}</span><span style="color: #90a4ae; font-size: 12px; font-weight: 500;">{label}</span><span style="color: white; font-size: 13px; font-weight: 600;">{price_str}</span><span style="color: {color}; font-size: 11px; font-weight: bold;">{arrow} {sign}{change:.2f}%</span></div>"""
+            items_html += item
+
+    # Sonsuz kusursuz döngü (seamless loop) için içeriği 8 kez çoğaltıp -50% CSS animasyonu kullanıyoruz.
+    # Sol %50 ekrandan kaydığında sağ %50 onunla tamamen aynı olduğu için başa sarmış gibi hissettirir.
+    repeated_items = items_html * 8
+    
+    ticker_html = f"""<style>@keyframes scroll-ticker {{ 0% {{ transform: translateX(0); }} 100% {{ transform: translateX(-50%); }} }} .ticker-wrap {{ overflow: hidden; white-space: nowrap; background: #131722; border-bottom: 1px solid #2a2e39; padding: 10px 0; margin-bottom: 15px; }} .ticker-content {{ display: inline-block; white-space: nowrap; animation: scroll-ticker 60s linear infinite; }} .ticker-content:hover {{ animation-play-state: paused; }}</style><div class="ticker-wrap"><div class="ticker-content">{repeated_items}</div></div>"""
+    st.markdown(ticker_html, unsafe_allow_html=True)
+
+
+# ─── Döviz & Altın verisini yükle ve ticker bar'ı göster ───
+try:
+    currency_data = load_currency_data()
+    render_ticker_bar(currency_data)
+except Exception:
+    render_ticker_bar({{}})  # Hata durumunda boş göster
+
 # TradingView Tarzı Kompakt Araç Çubuğu
-st.markdown("<div style='margin-top: 10px;'></div>", unsafe_allow_html=True)
 col1, col2, _ = st.columns([2, 2, 6])
 
 # Fiyat adımı (Interval) seçenekleri (TradingView formatında)
@@ -37,25 +164,6 @@ with col2:
         if not chart_type: chart_type = "🕯️ Mum"
     except AttributeError:
         chart_type = st.radio("Tip", ["🕯️ Mum", "📈 Çizgi"], horizontal=True, label_visibility="collapsed")
-
-
-def fetch_with_retry(func, max_retries=3, initial_wait=5):
-    """Yahoo Finance API çağrılarını rate limit hatalarına karşı retry mekanizması ile yapar."""
-    for attempt in range(max_retries):
-        try:
-            return func()
-        except Exception as e:
-            error_msg = str(e).lower()
-            # Rate limit veya Too Many Requests hatası kontrolü
-            if "too many requests" in error_msg or "rate limit" in error_msg or "429" in error_msg:
-                if attempt < max_retries - 1:
-                    wait_time = initial_wait * (2 ** attempt)  # Exponential backoff: 5s, 10s, 20s
-                    st.toast(f"⏳ Yahoo Finance rate limit — {wait_time} saniye bekleniyor... (Deneme {attempt + 2}/{max_retries})")
-                    time.sleep(wait_time)
-                else:
-                    raise  # Son denemede de başarısızsa hatayı fırlat
-            else:
-                raise  # Rate limit dışı hatalar direkt fırlatılır
 
 
 @st.cache_data(ttl=300)  # Fiyat verisi 5 dakika önbellek (rate limit'e takılmamak için artırıldı)
@@ -134,17 +242,18 @@ try:
         price_change = current_price - previous_price
         pct_change = (price_change / previous_price) * 100
         
-        # Güncel fiyatı TradingView tarzı, tek satırda şık bir başlık olarak gösterelim
-        price_color = "#26a69a" if price_change >= 0 else "#ef5350"
         sign = "+" if price_change >= 0 else ""
         
+        # Güncel fiyatı TradingView tarzı, tek satırda şık bir başlık olarak gösterelim
+        price_color = "#26a69a" if price_change >= 0 else "#ef5350"
+        
         header_html = f"""
-        <div style="display: flex; align-items: baseline; gap: 15px; margin-bottom: 20px; border-bottom: 1px solid #333; padding-bottom: 15px;">
-            <h1 style="margin: 0; font-size: 26px; font-weight: 600; color: white;">✈️ Pegasus (PGSUS)</h1>
-            <h2 style="margin: 0; font-size: 26px; font-weight: bold; color: white;">{current_price:.2f} ₺</h2>
-            <span style="color: {price_color}; font-size: 18px; font-weight: 500;">{sign}{price_change:.2f} ₺ ({sign}{pct_change:.2f}%)</span>
-        </div>
-        """
+<div style="display: flex; align-items: baseline; gap: 15px; margin-bottom: 20px; border-bottom: 1px solid #333; padding-bottom: 15px;">
+    <h1 style="margin: 0; font-size: 26px; font-weight: 600; color: white;">✈️ Pegasus (PGSUS)</h1>
+    <h2 style="margin: 0; font-size: 26px; font-weight: bold; color: white;">{current_price:.2f} ₺</h2>
+    <span style="color: {price_color}; font-size: 18px; font-weight: 500;">{sign}{price_change:.2f} ₺ ({sign}{pct_change:.2f}%)</span>
+</div>
+"""
         st.markdown(header_html, unsafe_allow_html=True)
         
         # Ekranı 2'ye bölelim: %75 Grafik, %25 Temel Analiz
@@ -209,6 +318,7 @@ try:
             ma200 = calc_200_ma or info.get('twoHundredDayAverage')
             
             # HTML ve CSS ile çok daha şık, kompakt ve hizalı bir tablo (TradingView sidebar benzeri)
+            # Markdown block parsing hatalarını önlemek için HTML'de boşluk/indent bırakılmadı
             html_content = f"""
 <div style="font-family: sans-serif; margin-top: 0px;">
 <h4 style="color: #90a4ae; font-size: 14px; margin-bottom: 10px; border-bottom: 1px solid #37474f; padding-bottom: 5px;">DEĞERLEMELER</h4>
