@@ -223,7 +223,85 @@ def load_info(ticker):
     stock = yf.Ticker(ticker)
     
     def _fetch_info():
-        return stock.info
+        data = stock.info
+        try:
+            net_incomes = stock.quarterly_income_stmt.loc['Net Income']
+            revenues = stock.quarterly_income_stmt.loc['Total Revenue']
+            data['quarterly_net_income'] = float(net_incomes.iloc[0])
+            series_dict = {}
+            for date, val in net_incomes.items():
+                if val == val: # NaN check
+                    rev = revenues.get(date, None)
+                    if rev == rev and rev is not None:
+                        series_dict[str(date)[:10]] = {'net_income': float(val), 'revenue': float(rev)}
+            data['quarterly_financials_series'] = series_dict
+        except Exception:
+            data['quarterly_net_income'] = None
+            data['quarterly_financials_series'] = {}
+            
+        # İş Yatırım UFRS 29 Kümülatif Verilerinden İzole Çeyreklik Hesaplama (Yahoo Hata Düzeltmesi)
+        if ticker.endswith('.IS'):
+            try:
+                import requests
+                from datetime import datetime
+                code = ticker.replace('.IS', '')
+                year = datetime.now().year
+                for y in [year, year-1, year-2]:
+                    url = f"https://www.isyatirim.com.tr/_layouts/15/IsYatirim.Website/Common/Data.aspx/MaliTablo?companyCode={code}&exchange=TRY&financialGroup=XI_29&year1={y}&period1=12&year2={y}&period2=9&year3={y}&period3=6&year4={y}&period4=3"
+                    res = requests.get(url, timeout=5).json()
+                    if 'value' in res and len(res['value']) > 0:
+                        ni_item = next((item for item in res['value'] if item['itemCode'] == '3L'), None)
+                        rev_item = next((item for item in res['value'] if item['itemCode'] == '3C'), None)
+                        if ni_item and rev_item and str(ni_item.get('value4') or '') != '':
+                            ni_c = [
+                                float(ni_item.get('value4') or 0),
+                                float(ni_item.get('value3') or 0),
+                                float(ni_item.get('value2') or 0),
+                                float(ni_item.get('value1') or 0)
+                            ]
+                            rev_c = [
+                                float(rev_item.get('value4') or 0),
+                                float(rev_item.get('value3') or 0),
+                                float(rev_item.get('value2') or 0),
+                                float(rev_item.get('value1') or 0)
+                            ]
+                            
+                            # Kullanıcı Seçenek 1'i (İş Yatırım Kümülatif formatı) seçtiği için doğrudan kümülatif veriyi kullanıyoruz
+                            ni_s = ni_c
+                            rev_s = rev_c
+                            
+                            q_dates = [f"{y}-03-31", f"{y}-06-30", f"{y}-09-30", f"{y}-12-31"]
+                            new_series = {}
+                            for i in range(4):
+                                if ni_c[i] != 0:
+                                    new_series[q_dates[i]] = {'net_income': ni_s[i], 'revenue': rev_s[i]}
+                            
+                            if new_series:
+                                data['quarterly_financials_series'] = new_series
+                                last_key = sorted(list(new_series.keys()))[-1]
+                                data['quarterly_net_income'] = new_series[last_key]['net_income']
+                                
+                                # Y/Y Büyümeyi Hesapla (Önceki yılın aynı dönemiyle)
+                                try:
+                                    last_month = last_key.split('-')[1]
+                                    period = int(last_month)
+                                    prev_y = y - 1
+                                    prev_url = f"https://www.isyatirim.com.tr/_layouts/15/IsYatirim.Website/Common/Data.aspx/MaliTablo?companyCode={code}&exchange=TRY&financialGroup=XI_29&year1={prev_y}&period1={period}&year2={prev_y}&period2=9&year3={prev_y}&period3=6&year4={prev_y}&period4=3"
+                                    prev_res = requests.get(prev_url, timeout=5).json()
+                                    if 'value' in prev_res and len(prev_res['value']) > 0:
+                                        prev_ni_item = next((item for item in prev_res['value'] if item['itemCode'] == '3L'), None)
+                                        if prev_ni_item:
+                                            prev_val = float(prev_ni_item.get('value1') or 0)
+                                            if prev_val != 0:
+                                                growth = (data['quarterly_net_income'] - prev_val) / abs(prev_val)
+                                                data['earningsQuarterlyGrowth'] = growth
+                                except Exception:
+                                    pass
+                            break
+            except Exception:
+                pass
+
+        return data
     
     return fetch_with_retry(_fetch_info)
 
@@ -301,7 +379,7 @@ try:
                 yaxis=dict(title='Fiyat (TRY)', side='right', minallowed=0), # minallowed=0 aşağı kaydırıldığında 0'ın altına inilmesini KESİN engeller
                 xaxis_rangeslider_visible=False,
                 margin=dict(l=0, r=40, t=10, b=0), # Etiketin sağda sığması için r=40 yaptık
-                height=600, # Chart yüksekliğini orijinaline çektik
+                height=660, # Chart yüksekliğini büyüterek eşitledik
                 dragmode='pan' # Tıklayıp sürükleyince grafiği kaydırma (pan) özelliğini açar
             )
             st.plotly_chart(fig, width='stretch', config={'scrollZoom': True})
@@ -313,6 +391,25 @@ try:
             mcap = info.get('marketCap')
             mcap_str = f"{mcap / 1_000_000_000:.2f} Milyar ₺" if mcap else "Veri Yok"
             
+            # Karlılık verilerini hazırla
+            q_income = info.get('quarterly_net_income')
+            if q_income is not None:
+                q_income_color = "#26a69a" if q_income > 0 else "#ef5350"
+                q_income_str = f"{q_income / 1_000_000_000:.2f} Milyar ₺" if abs(q_income) >= 1_000_000_000 else f"{q_income / 1_000_000:.2f} Milyon ₺"
+            else:
+                q_income_color = "white"
+                q_income_str = "Veri Yok"
+                
+            growth = info.get('earningsQuarterlyGrowth')
+            if growth is not None:
+                growth_pct = growth * 100
+                growth_color = "#26a69a" if growth > 0 else "#ef5350"
+                growth_sign = "+" if growth > 0 else ""
+                growth_str = f"{growth_sign}{growth_pct:.2f}%"
+            else:
+                growth_color = "white"
+                growth_str = "Veri Yok"
+            
             # Kendi hesapladığımız kesin MA değerlerini kullanıyoruz, yoksa API'nin verdiğini fallback olarak al
             ma50 = calc_50_ma or info.get('fiftyDayAverage')
             ma200 = calc_200_ma or info.get('twoHundredDayAverage')
@@ -321,54 +418,145 @@ try:
             # Markdown block parsing hatalarını önlemek için HTML'de boşluk/indent bırakılmadı
             html_content = f"""
 <div style="font-family: sans-serif; margin-top: 0px;">
-<h4 style="color: #90a4ae; font-size: 14px; margin-bottom: 10px; border-bottom: 1px solid #37474f; padding-bottom: 5px;">DEĞERLEMELER</h4>
-<div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
-<span style="color: #b0bec5; font-size: 14px;">PD/DD Oranı</span>
-<span style="font-weight: bold; color: white; font-size: 14px;">{format_val(info.get('priceToBook'))}</span>
+<h4 style="color: #90a4ae; font-size: 12px; margin-bottom: 5px; border-bottom: 1px solid #37474f; padding-bottom: 3px;">DEĞERLEMELER</h4>
+<div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
+<span style="color: #b0bec5; font-size: 12px;">PD/DD Oranı</span>
+<span style="font-weight: bold; color: white; font-size: 12px;">{format_val(info.get('priceToBook'))}</span>
 </div>
-<div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
-<span style="color: #b0bec5; font-size: 14px;">F/K (Fiyat/Kazanç)</span>
-<span style="font-weight: bold; color: white; font-size: 14px;">{format_val(info.get('trailingPE'))}</span>
+<div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
+<span style="color: #b0bec5; font-size: 12px;">F/K (Fiyat/Kazanç)</span>
+<span style="font-weight: bold; color: white; font-size: 12px;">{format_val(info.get('trailingPE'))}</span>
 </div>
-<div style="display: flex; justify-content: space-between; margin-bottom: 25px;">
-<span style="color: #b0bec5; font-size: 14px;">Beta (Volatilite)</span>
-<span style="font-weight: bold; color: white; font-size: 14px;">{format_val(info.get('beta'))}</span>
-</div>
-
-<h4 style="color: #90a4ae; font-size: 14px; margin-bottom: 10px; border-bottom: 1px solid #37474f; padding-bottom: 5px;">ORTALAMALAR</h4>
-<div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
-<span style="color: #b0bec5; font-size: 14px;">50 Günlük Ort.</span>
-<span style="font-weight: bold; color: white; font-size: 14px;">{format_val(ma50)} ₺</span>
-</div>
-<div style="display: flex; justify-content: space-between; margin-bottom: 25px;">
-<span style="color: #b0bec5; font-size: 14px;">200 Günlük Ort.</span>
-<span style="font-weight: bold; color: white; font-size: 14px;">{format_val(ma200)} ₺</span>
+<div style="display: flex; justify-content: space-between; margin-bottom: 12px;">
+<span style="color: #b0bec5; font-size: 12px;">Beta (Volatilite)</span>
+<span style="font-weight: bold; color: white; font-size: 12px;">{format_val(info.get('beta'))}</span>
 </div>
 
-<h4 style="color: #90a4ae; font-size: 14px; margin-bottom: 10px; border-bottom: 1px solid #37474f; padding-bottom: 5px;">PERFORMANS</h4>
-<div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
-<span style="color: #b0bec5; font-size: 14px;">52 Hafta Zirve</span>
-<span style="font-weight: bold; color: #26a69a; font-size: 14px;">{format_val(info.get('fiftyTwoWeekHigh'))} ₺</span>
+<h4 style="color: #90a4ae; font-size: 12px; margin-bottom: 5px; border-bottom: 1px solid #37474f; padding-bottom: 3px;">ORTALAMALAR</h4>
+<div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
+<span style="color: #b0bec5; font-size: 12px;">50 Günlük Ort.</span>
+<span style="font-weight: bold; color: white; font-size: 12px;">{format_val(ma50)} ₺</span>
 </div>
-<div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
-<span style="color: #b0bec5; font-size: 14px;">52 Hafta Dip</span>
-<span style="font-weight: bold; color: #ef5350; font-size: 14px;">{format_val(info.get('fiftyTwoWeekLow'))} ₺</span>
-</div>
-<div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
-<span style="color: #b0bec5; font-size: 14px;">Piyasa Değeri</span>
-<span style="font-weight: bold; color: white; font-size: 14px;">{mcap_str}</span>
+<div style="display: flex; justify-content: space-between; margin-bottom: 12px;">
+<span style="color: #b0bec5; font-size: 12px;">200 Günlük Ort.</span>
+<span style="font-weight: bold; color: white; font-size: 12px;">{format_val(ma200)} ₺</span>
 </div>
 
-<div style="margin-top: 40px; display: flex; gap: 10px; align-items: flex-start; text-align: left; color: #78909c; font-size: 13px; font-style: italic; border-top: 1px dashed #37474f; padding-top: 15px; line-height: 1.5;">
-<span style="font-size: 16px; margin-top: 1px;">ℹ️</span>
-<div>
-Veriler <b>Yahoo Finance</b> üzerinden sağlanmakta olup <b>5 dakikada bir</b> önbelleğe alınmaktadır.<br>
-Güncel fiyatı görmek için 5 dakikanın ardından <b>sayfayı yenileyebilirsiniz.</b>
+<h4 style="color: #90a4ae; font-size: 12px; margin-bottom: 5px; border-bottom: 1px solid #37474f; padding-bottom: 3px;">PERFORMANS</h4>
+<div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
+<span style="color: #b0bec5; font-size: 12px;">52 Hafta Zirve</span>
+<span style="font-weight: bold; color: #26a69a; font-size: 12px;">{format_val(info.get('fiftyTwoWeekHigh'))} ₺</span>
 </div>
+<div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
+<span style="color: #b0bec5; font-size: 12px;">52 Hafta Dip</span>
+<span style="font-weight: bold; color: #ef5350; font-size: 12px;">{format_val(info.get('fiftyTwoWeekLow'))} ₺</span>
+</div>
+<div style="display: flex; justify-content: space-between; margin-bottom: 12px;">
+<span style="color: #b0bec5; font-size: 12px;">Piyasa Değeri</span>
+<span style="font-weight: bold; color: white; font-size: 12px;">{mcap_str}</span>
+</div>
+
+<h4 style="color: #90a4ae; font-size: 12px; margin-bottom: 5px; border-bottom: 1px solid #37474f; padding-bottom: 3px;">KARLILIK (ÇEYREKLİK)</h4>
+<div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
+<span style="color: #b0bec5; font-size: 12px;">Net Kar</span>
+<span style="font-weight: bold; color: {q_income_color}; font-size: 12px;">{q_income_str}</span>
+</div>
+<div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
+<span style="color: #b0bec5; font-size: 12px;">Kar Büyümesi (Y/Y)</span>
+<span style="font-weight: bold; color: {growth_color}; font-size: 12px;">{growth_str}</span>
 </div>
 </div>
 """
             st.markdown(html_content, unsafe_allow_html=True)
+
+            # --- Çeyreklik Gelir ve Kar Çubuğu (Grouped Bar Chart) ---
+            q_series = info.get('quarterly_financials_series', {})
+            if q_series:
+                st.markdown("""
+<div style="display: flex; justify-content: space-between; align-items: flex-end; margin-top: 15px; margin-bottom: 5px; border-bottom: 1px solid #37474f; padding-bottom: 3px;">
+    <h4 style="color: #90a4ae; font-size: 14px; font-weight: bold; margin: 0; padding: 0;">GELİR VE KAR (ÇEYREKLİK)</h4>
+    <div style="font-size: 12px; color: #b0bec5; margin-bottom: 1px;">
+        <span style="color: #1E88E5;">■</span> Gelir &nbsp;&nbsp;
+        <span style="color: #26a69a;">■</span> Kar &nbsp;&nbsp;
+        <span style="color: #ef5350;">■</span> Zarar
+    </div>
+</div>
+""", unsafe_allow_html=True)
+                
+                dates = list(q_series.keys()) # Kronolojik sıra (Soldan sağa Q1 -> Q4)
+                net_incomes = [q_series[d]['net_income'] for d in dates]
+                revenues = [q_series[d]['revenue'] for d in dates]
+                
+                # Tarihleri Q formatına çevir (Örn: Q1 '25)
+                formatted_dates = []
+                for d in dates:
+                    year = d[:4]
+                    month = d[5:7]
+                    if month == '03': q = 'Q1'
+                    elif month == '06': q = 'Q2'
+                    elif month == '09': q = 'Q3'
+                    elif month == '12': q = 'Q4'
+                    else: q = 'Q?'
+                    formatted_dates.append(f"{q} '{year[-2:]}")
+                
+                def fmt(v):
+                    return f"{v / 1_000_000_000:.2f} Milyar ₺" if abs(v) >= 1_000_000_000 else f"{v / 1_000_000:.2f} Milyon ₺"
+                
+                rev_hover = [f"<b>{d}</b><br>Gelir: {fmt(v)}" for d, v in zip(formatted_dates, revenues)]
+                ni_hover = [f"<b>{d}</b><br>Net Kar: {fmt(v)}" for d, v in zip(formatted_dates, net_incomes)]
+                
+                # Kar durumuna göre dinamik renk (Kardaysa Yeşil, Zarardaysa Kırmızı)
+                ni_colors = ['#26a69a' if val >= 0 else '#ef5350' for val in net_incomes]
+                
+                fig_bar = go.Figure()
+                
+                fig_bar.add_trace(go.Bar(
+                    x=formatted_dates,
+                    y=revenues,
+                    name='Gelir',
+                    marker_color='#1E88E5', # Daha canlı, profesyonel bir mavi
+                    hoverinfo='text',
+                    hovertext=rev_hover,
+                    marker_line_width=0,
+                ))
+                
+                fig_bar.add_trace(go.Bar(
+                    x=formatted_dates,
+                    y=net_incomes,
+                    name='Net Kar',
+                    marker_color=ni_colors, # Dinamik Yeşil/Kırmızı
+                    hoverinfo='text',
+                    hovertext=ni_hover,
+                    marker_line_width=0,
+                ))
+                
+                fig_bar.update_layout(
+                    barmode='group',
+                    bargap=0.35, # Sütunları inceltir
+                    bargroupgap=0.05,
+                    template='plotly_dark',
+                    height=240, # Yüksekliği büyüterek daha belirgin hale getirdik
+                    margin=dict(l=0, r=0, t=10, b=0),
+                    showlegend=False,
+                    xaxis=dict(showgrid=False, title='', type='category', tickfont=dict(size=9, color="#90a4ae")),
+                    yaxis=dict(showgrid=True, gridcolor='#2a2e39', title='', showticklabels=False, zerolinecolor='#37474f'),
+                    plot_bgcolor='rgba(0,0,0,0)',
+                    paper_bgcolor='rgba(0,0,0,0)'
+                )
+                
+                st.plotly_chart(fig_bar, use_container_width=True, config={'displayModeBar': False})
+                
+                info_html = """
+<div style="margin-top: 15px; display: flex; gap: 8px; align-items: flex-start; text-align: left; color: #78909c; font-size: 11px; font-style: italic; border-top: 1px dashed #37474f; padding-top: 10px; line-height: 1.4;">
+<span style="font-size: 14px; margin-top: 1px;">ℹ️</span>
+<div>
+Fiyat ve temel veriler <b>Yahoo Finance</b> üzerinden sağlanmakta olup <b>5 dakikada bir</b> önbelleğe alınmaktadır.<br>
+Çeyreklik Gelir ve Kar tablosu (UFRS 29 Uyumlu Kümülatif Veriler) doğrudan <b>İş Yatırım</b>'dan çekilmektedir.<br>
+Güncel fiyatı görmek için 5 dakikanın ardından sayfayı yenileyebilirsiniz.
+</div>
+</div>
+"""
+                st.markdown(info_html, unsafe_allow_html=True)
 
     else:
         st.warning("Hisse verisi çekilemedi. Lütfen piyasa durumunu ve internet bağlantınızı kontrol edin.")
