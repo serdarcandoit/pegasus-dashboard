@@ -29,10 +29,10 @@ def fetch_with_retry(func, max_retries=3, initial_wait=5):
         except Exception as e:
             error_msg = str(e).lower()
             # Rate limit veya Too Many Requests hatası kontrolü
-            if "too many requests" in error_msg or "rate limit" in error_msg or "429" in error_msg:
+            if "too many requests" in error_msg or "rate limit" in error_msg or "429" in error_msg or "empty data" in error_msg:
                 if attempt < max_retries - 1:
                     wait_time = initial_wait * (2 ** attempt)  # Exponential backoff: 5s, 10s, 20s
-                    st.toast(f"⏳ Yahoo Finance rate limit — {wait_time} saniye bekleniyor... (Deneme {attempt + 2}/{max_retries})")
+                    print(f"⏳ Yahoo Finance rate limit veya boş veri — {wait_time} saniye bekleniyor... (Deneme {attempt + 2}/{max_retries})")
                     time.sleep(wait_time)
                 else:
                     raise  # Son denemede de başarısızsa hatayı fırlat
@@ -221,6 +221,11 @@ def load_info(ticker):
     def _fetch_info():
         info_data = stock.info
         data = dict(info_data) if isinstance(info_data, dict) else {}
+        
+        # Eğer veri boş dönerse (rate limit vb. sebeple), retry mekanizmasını tetiklemek için hata fırlat
+        if not data or len(data) < 5:
+            raise Exception("Rate limit or empty data from yfinance info")
+            
         try:
             net_incomes = stock.quarterly_income_stmt.loc['Net Income']
             revenues = stock.quarterly_income_stmt.loc['Total Revenue']
