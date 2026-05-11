@@ -97,11 +97,7 @@ def render_ticker_bar(currency_data):
     
     if not currency_data:
         # Veri çekilemezse varsayılan bir yazı göster
-        items_html = f"""
-        <div style="display: inline-flex; align-items: center; gap: 6px; padding: 0 20px;">
-            <span style="color: #90a4ae; font-size: 13px; font-weight: 500;">Döviz ve altın verileri yükleniyor veya API limitine takıldı...</span>
-        </div>
-        """
+        items_html = f"""<div style="display: inline-flex; align-items: center; gap: 6px; padding: 0 20px;"><span style="color: #90a4ae; font-size: 13px; font-weight: 500;">Döviz ve altın verileri yükleniyor veya API limitine takıldı...</span></div>"""
     else:
         for key, data in currency_data.items():
             price = data["price"]
@@ -223,7 +219,8 @@ def load_info(ticker):
     stock = yf.Ticker(ticker)
     
     def _fetch_info():
-        data = stock.info
+        info_data = stock.info
+        data = dict(info_data) if isinstance(info_data, dict) else {}
         try:
             net_incomes = stock.quarterly_income_stmt.loc['Net Income']
             revenues = stock.quarterly_income_stmt.loc['Total Revenue']
