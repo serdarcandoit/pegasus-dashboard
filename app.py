@@ -248,60 +248,92 @@ def load_info(ticker):
                 from datetime import datetime
                 code = ticker.replace('.IS', '')
                 year = datetime.now().year
+                
+                all_series = {}  # Tüm yılların verilerini topla
+                
                 for y in [year, year-1, year-2]:
                     url = f"https://www.isyatirim.com.tr/_layouts/15/IsYatirim.Website/Common/Data.aspx/MaliTablo?companyCode={code}&exchange=TRY&financialGroup=XI_29&year1={y}&period1=12&year2={y}&period2=9&year3={y}&period3=6&year4={y}&period4=3"
-                    res = requests.get(url, timeout=5).json()
-                    if 'value' in res and len(res['value']) > 0:
-                        ni_item = next((item for item in res['value'] if item['itemCode'] == '3L'), None)
-                        rev_item = next((item for item in res['value'] if item['itemCode'] == '3C'), None)
-                        if ni_item and rev_item and str(ni_item.get('value4') or '') != '':
-                            ni_c = [
-                                float(ni_item.get('value4') or 0),
-                                float(ni_item.get('value3') or 0),
-                                float(ni_item.get('value2') or 0),
-                                float(ni_item.get('value1') or 0)
-                            ]
-                            rev_c = [
-                                float(rev_item.get('value4') or 0),
-                                float(rev_item.get('value3') or 0),
-                                float(rev_item.get('value2') or 0),
-                                float(rev_item.get('value1') or 0)
-                            ]
-                            
-                            # Kullanıcı Seçenek 1'i (İş Yatırım Kümülatif formatı) seçtiği için doğrudan kümülatif veriyi kullanıyoruz
-                            ni_s = ni_c
-                            rev_s = rev_c
-                            
-                            q_dates = [f"{y}-03-31", f"{y}-06-30", f"{y}-09-30", f"{y}-12-31"]
-                            new_series = {}
-                            for i in range(4):
-                                if ni_c[i] != 0:
-                                    new_series[q_dates[i]] = {'net_income': ni_s[i], 'revenue': rev_s[i]}
-                            
-                            if new_series:
-                                data['quarterly_financials_series'] = new_series
-                                last_key = sorted(list(new_series.keys()))[-1]
-                                data['quarterly_net_income'] = new_series[last_key]['net_income']
-                                
-                                # Y/Y Büyümeyi Hesapla (Önceki yılın aynı dönemiyle)
-                                try:
-                                    last_month = last_key.split('-')[1]
-                                    period = int(last_month)
-                                    prev_y = y - 1
-                                    prev_url = f"https://www.isyatirim.com.tr/_layouts/15/IsYatirim.Website/Common/Data.aspx/MaliTablo?companyCode={code}&exchange=TRY&financialGroup=XI_29&year1={prev_y}&period1={period}&year2={prev_y}&period2=9&year3={prev_y}&period3=6&year4={prev_y}&period4=3"
-                                    prev_res = requests.get(prev_url, timeout=5).json()
-                                    if 'value' in prev_res and len(prev_res['value']) > 0:
-                                        prev_ni_item = next((item for item in prev_res['value'] if item['itemCode'] == '3L'), None)
-                                        if prev_ni_item:
-                                            prev_val = float(prev_ni_item.get('value1') or 0)
-                                            if prev_val != 0:
-                                                growth = (data['quarterly_net_income'] - prev_val) / abs(prev_val)
-                                                data['earningsQuarterlyGrowth'] = growth
-                                except Exception:
-                                    pass
-                            break
+                    try:
+                        res = requests.get(url, timeout=5).json()
+                    except Exception:
+                        continue
+                    if 'value' not in res or len(res['value']) == 0:
+                        continue
+                    ni_item = next((item for item in res['value'] if item['itemCode'] == '3L'), None)
+                    rev_item = next((item for item in res['value'] if item['itemCode'] == '3C'), None)
+                    if not ni_item or not rev_item:
+                        continue
+
+                    # value1=Q1(Mar), value2=Q2(Jun), value3=Q3(Sep), value4=Q4(Dec) — İş yatırım Kümülatif 
+                    ni_vals = [
+                        float(ni_item.get('value4') or 0),
+                        float(ni_item.get('value3') or 0),
+                        float(ni_item.get('value2') or 0),
+                        float(ni_item.get('value1') or 0),
+                    ]
+                    rev_vals = [
+                        float(rev_item.get('value4') or 0),
+                        float(rev_item.get('value3') or 0),
+                        float(rev_item.get('value2') or 0),
+                        float(rev_item.get('value1') or 0),
+                    ]
+                    
+                    q_dates = [f"{y}-03-31", f"{y}-06-30", f"{y}-09-30", f"{y}-12-31"]
+                    for i in range(4):
+                        if ni_vals[i] != 0 or rev_vals[i] != 0:
+                            all_series[q_dates[i]] = {'net_income': ni_vals[i], 'revenue': rev_vals[i]}
+
+                if all_series:
+                    sorted_dates = sorted(list(all_series.keys()))
+                    last_4_dates = sorted_dates[-4:]
+                    filtered_series = {k: all_series[k] for k in last_4_dates}
+                    
+                    data['quarterly_financials_series'] = filtered_series
+                    last_key = last_4_dates[-1]
+                    data['quarterly_net_income'] = filtered_series[last_key]['net_income']
+
+                    # Y/Y Büyümeyi Hesapla (Önceki yılın aynı dönemiyle)
+                    try:
+                        last_month = last_key.split('-')[1]
+                        period = int(last_month)
+                        prev_y = int(last_key[:4]) - 1
+                        prev_url = f"https://www.isyatirim.com.tr/_layouts/15/IsYatirim.Website/Common/Data.aspx/MaliTablo?companyCode={code}&exchange=TRY&financialGroup=XI_29&year1={prev_y}&period1={period}&year2={prev_y}&period2=9&year3={prev_y}&period3=6&year4={prev_y}&period4=3"
+                        prev_res = requests.get(prev_url, timeout=5).json()
+                        if 'value' in prev_res and len(prev_res['value']) > 0:
+                            prev_ni_item = next((item for item in prev_res['value'] if item['itemCode'] == '3L'), None)
+                            if prev_ni_item:
+                                period_key = {3: 'value1', 6: 'value2', 9: 'value3', 12: 'value4'}.get(period, 'value4')
+                                prev_val = float(prev_ni_item.get(period_key) or 0)
+                                if prev_val != 0:
+                                    growth = (data['quarterly_net_income'] - prev_val) / abs(prev_val)
+                                    data['earningsQuarterlyGrowth'] = growth
+                    except Exception:
+                        pass
             except Exception:
                 pass
+
+        # Beta değerini TradingView Scanner API'sinden çek (yfinance'den daha güvenilir)
+        try:
+            import requests as _req
+            tv_symbol = ticker.replace('.IS', '')
+            scan_url = "https://scanner.tradingview.com/global/scan"
+            scan_payload = {
+                "symbols": {"tickers": [f"BIST:{tv_symbol}"]},
+                "columns": ["beta_1_year"]
+            }
+            scan_headers = {
+                "Content-Type": "application/json",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            }
+            scan_res = _req.post(scan_url, json=scan_payload, headers=scan_headers, timeout=10)
+            if scan_res.status_code == 200:
+                scan_data = scan_res.json()
+                if scan_data.get("data") and len(scan_data["data"]) > 0:
+                    beta_val = scan_data["data"][0]["d"][0]
+                    if beta_val is not None:
+                        data['beta'] = round(float(beta_val), 2)
+        except Exception:
+            pass
 
         return data
     
@@ -540,13 +572,15 @@ try:
                     height=240, # Yüksekliği büyüterek daha belirgin hale getirdik
                     margin=dict(l=0, r=0, t=10, b=0),
                     showlegend=False,
-                    xaxis=dict(showgrid=False, title='', type='category', tickfont=dict(size=9, color="#90a4ae")),
-                    yaxis=dict(showgrid=True, gridcolor='#2a2e39', title='', showticklabels=False, zerolinecolor='#37474f'),
+                    dragmode=False, # Grafiğin kaydırılmasını engeller
+                    xaxis=dict(showgrid=False, title='', type='category', tickfont=dict(size=9, color="#90a4ae"), fixedrange=True),
+                    yaxis=dict(showgrid=True, gridcolor='#2a2e39', title='', showticklabels=False, zerolinecolor='#37474f', fixedrange=True),
                     plot_bgcolor='rgba(0,0,0,0)',
                     paper_bgcolor='rgba(0,0,0,0)'
                 )
                 
-                st.plotly_chart(fig_bar, use_container_width=True, config={'displayModeBar': False})
+                # Sadece tıklama ile etkileşimi aç, zoom/pan modlarını kapat
+                st.plotly_chart(fig_bar, use_container_width=True, config={'displayModeBar': False, 'staticPlot': False})
                 
                 info_html = """
 <div style="margin-top: 15px; display: flex; gap: 8px; align-items: flex-start; text-align: left; color: #78909c; font-size: 11px; font-style: italic; border-top: 1px dashed #37474f; padding-top: 10px; line-height: 1.4;">
