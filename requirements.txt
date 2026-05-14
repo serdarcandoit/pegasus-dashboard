@@ -2,3 +2,5 @@ streamlit
 yfinance
 plotly
 requests
+openpyxl
+xlrd
