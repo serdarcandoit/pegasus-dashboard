@@ -593,6 +593,188 @@ Güncel fiyatı görmek için 5 dakikanın ardından sayfayı yenileyebilirsiniz
 </div>
 """
                 st.markdown(info_html, unsafe_allow_html=True)
+                
+        # ─── Makroekonomik Veriler (TCMB Excel Dosyaları) ───
+        st.markdown("""
+<div style="margin-top: 25px; margin-bottom: 10px; border-bottom: 1px solid #37474f; padding-bottom: 5px;">
+<h3 style="color: #90a4ae; font-size: 16px; font-weight: bold; margin: 0;">🌍 Makroekonomik Göstergeler (Türkiye)</h3>
+</div>
+""", unsafe_allow_html=True)
+
+        col_inf, col_int = st.columns(2, gap="large")
+        
+        with col_inf:
+            st.markdown("<h4 style='color: #b0bec5; font-size: 13px; margin-bottom: 5px;'>📈 Enflasyon Oranı (Yıllık, YoY)</h4>", unsafe_allow_html=True)
+            @st.cache_data
+            def load_local_inflation_data():
+                try:
+                    import pandas as pd
+                    import re
+                    dates = []
+                    values = []
+                    df = pd.read_excel('data/inflation_tcmb.xlsx', header=None)
+                    for i, row in df.iterrows():
+                        val = row.iloc[1]
+                        if pd.notna(val) and isinstance(val, (int, float)):
+                            s_date = str(row.iloc[0]).strip().replace('\xad', '-').replace('\u00ad', '-')
+                            if '-' not in s_date and ' ' in s_date: s_date = s_date.replace(' ', '-')
+                            
+                            # Tarihi YYYY-MM-01 formatına çevir
+                            m = re.search(r'(\d{2})[- ]?(\d{4})', s_date)
+                            if m:
+                                clean_date = f"{m.group(2)}-{m.group(1)}-01"
+                                dates.append(clean_date)
+                                values.append(float(val))
+                                
+                    # Veri en yeniden eskiye dönüyorsa tersine çevirelim
+                    dates.reverse()
+                    values.reverse()
+                    return dates, values
+                except Exception as e:
+                    print(f"Lokal Excel okuma hatası: {e}")
+                    return [], []
+
+            inf_years, inf_values = load_local_inflation_data()
+
+            if inf_years and inf_values:
+                fig_inf = go.Figure()
+                fig_inf.add_trace(go.Scatter(
+                    x=inf_years,
+                    y=inf_values,
+                    mode='lines+markers',
+                    name='Enflasyon (%)',
+                    line=dict(color='#00D2FF', width=3), # Modern Neon Cam Göbeği
+                    marker=dict(size=7, color='#00D2FF', line=dict(width=1.5, color='#11151C')),
+                    fill='tozeroy',
+                    fillcolor='rgba(0, 210, 255, 0.15)',
+                    hovertemplate='<b>%{x}</b><br>Enflasyon: %{y:.2f}%<extra></extra>'
+                ))
+                
+                last_year = inf_years[-1]
+                last_val = inf_values[-1]
+                
+                fig_inf.add_annotation(
+                    x=last_year,
+                    y=last_val,
+                    text=f"<b>{last_val:.1f}%</b>",
+                    showarrow=True,
+                    arrowhead=1,
+                    arrowcolor="rgba(255, 255, 255, 0.5)",
+                    arrowsize=1.2,
+                    arrowwidth=1.5,
+                    ax=0,
+                    ay=-40,
+                    font=dict(color="#11151C", size=12, family="Inter, Arial, sans-serif", weight="bold"),
+                    bgcolor="#00D2FF",
+                    bordercolor="rgba(0,0,0,0)",
+                    borderwidth=0,
+                    borderpad=5
+                )
+                
+                fig_inf.update_layout(
+                    template='plotly_dark',
+                    height=320,
+                    margin=dict(l=50, r=10, t=20, b=30),
+                    xaxis=dict(showgrid=False, title='', fixedrange=True),
+                    yaxis=dict(showgrid=True, gridcolor='#2a2e39', title='Enflasyon (%)', side='left', fixedrange=True),
+                    plot_bgcolor='rgba(0,0,0,0)',
+                    paper_bgcolor='rgba(0,0,0,0)',
+                    dragmode=False
+                )
+                st.plotly_chart(fig_inf, use_container_width=True, config={'displayModeBar': False, 'staticPlot': False})
+            else:
+                st.warning("Veri klasöründeki Excel dosyası okunamadı veya Türkiye verisi bulunamadı.")
+
+        with col_int:
+            st.markdown("<h4 style='color: #b0bec5; font-size: 13px; margin-bottom: 5px;'>🏦 TCMB Politika Faizi</h4>", unsafe_allow_html=True)
+            
+            @st.cache_data
+            def load_local_interest_rate():
+                try:
+                    import pandas as pd
+                    dates = []
+                    values = []
+                    xl = pd.ExcelFile('data/interest_rate_tcmb.xlsx')
+                    for s in xl.sheet_names:
+                        df = pd.read_excel(xl, s, header=None)
+                        for i, row in df.iterrows():
+                            # PDF kaynaklı çok satırlı hücreleri ayır
+                            c0 = str(row.iloc[0]).split('\n')
+                            c1 = str(row.iloc[1]).split('\n') if len(row) > 1 else []
+                            c2 = str(row.iloc[2]).split('\n') if len(row) > 2 else []
+                            for idx in range(len(c0)):
+                                cell = c0[idx].strip().split()[0]
+                                if ('-' in cell or '.' in cell) and len(cell) >= 8 and cell[0].isdigit():
+                                    try:
+                                        val1 = float(c1[idx].strip()) if idx < len(c1) and c1[idx].strip() not in ('NaN', 'nan', '') else 0
+                                        val2 = float(c2[idx].strip()) if idx < len(c2) and c2[idx].strip() not in ('NaN', 'nan', '') else 0
+                                        val = max(val1, val2)
+                                        if val > 0:
+                                            if '.' in cell:
+                                                parts = cell.split('.')
+                                                if len(parts)==3:
+                                                    if len(parts[2]) == 2: parts[2] = '20'+parts[2]
+                                                    cell = f'{parts[2]}-{parts[1]}-{parts[0]}'
+                                            dates.append(cell[:10])
+                                            values.append(val)
+                                    except:
+                                        pass
+                    # Tarihe göre sırala
+                    combined = sorted(list(zip(dates, values)), key=lambda x: x[0])
+                    if combined:
+                        dates, values = zip(*combined)
+                        return list(dates), list(values)
+                except Exception as e:
+                    print(f"Faiz dosyası okuma hatası: {e}")
+                return [], []
+            
+            int_dates, int_values = load_local_interest_rate()
+            
+            if int_dates and int_values:
+                fig_int = go.Figure()
+                fig_int.add_trace(go.Scatter(
+                    x=int_dates,
+                    y=int_values,
+                    mode='lines+markers',
+                    name='Politika Faizi (%)',
+                    line=dict(color='#FF3A59', width=3), # Modern Neon Mercan/Kırmızı
+                    marker=dict(size=7, color='#FF3A59', line=dict(width=1.5, color='#11151C')),
+                    fill='tozeroy',
+                    fillcolor='rgba(255, 58, 89, 0.15)',
+                    hovertemplate='<b>%{x}</b><br>Faiz: %{y:.2f}%<extra></extra>'
+                ))
+                
+                fig_int.add_annotation(
+                    x=int_dates[-1],
+                    y=int_values[-1],
+                    text=f"<b>{int_values[-1]:.1f}%</b>",
+                    showarrow=True,
+                    arrowhead=1,
+                    arrowcolor="rgba(255, 255, 255, 0.5)",
+                    arrowsize=1.2,
+                    arrowwidth=1.5,
+                    ax=0,
+                    ay=-40,
+                    font=dict(color="white", size=12, family="Inter, Arial, sans-serif"),
+                    bgcolor="#FF3A59",
+                    bordercolor="rgba(0,0,0,0)",
+                    borderwidth=0,
+                    borderpad=5
+                )
+                
+                fig_int.update_layout(
+                    template='plotly_dark',
+                    height=320,
+                    margin=dict(l=10, r=50, t=20, b=30),
+                    xaxis=dict(showgrid=False, title='', fixedrange=True),
+                    yaxis=dict(showgrid=True, gridcolor='#2a2e39', title='Faiz (%)', side='right', fixedrange=True),
+                    plot_bgcolor='rgba(0,0,0,0)',
+                    paper_bgcolor='rgba(0,0,0,0)',
+                    dragmode=False
+                )
+                st.plotly_chart(fig_int, use_container_width=True, config={'displayModeBar': False, 'staticPlot': False})
+            else:
+                st.info("Faiz verisi Excel'den okunamadı.")
 
     else:
         st.warning("Hisse verisi çekilemedi. Lütfen piyasa durumunu ve internet bağlantınızı kontrol edin.")
