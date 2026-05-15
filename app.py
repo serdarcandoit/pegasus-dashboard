@@ -601,7 +601,7 @@ Güncel fiyatı görmek için 5 dakikanın ardından sayfayı yenileyebilirsiniz
 </div>
 """, unsafe_allow_html=True)
 
-        col_inf, col_int = st.columns(2, gap="large")
+        col_inf, col_int, col_bond = st.columns(3, gap="large")
         
         with col_inf:
             st.markdown("<h4 style='color: #b0bec5; font-size: 13px; margin-bottom: 5px;'>📈 Enflasyon Oranı (Yıllık, YoY)</h4>", unsafe_allow_html=True)
@@ -674,9 +674,9 @@ Güncel fiyatı görmek için 5 dakikanın ardından sayfayı yenileyebilirsiniz
                 fig_inf.update_layout(
                     template='plotly_dark',
                     height=320,
-                    margin=dict(l=50, r=10, t=20, b=30),
+                    margin=dict(l=10, r=50, t=20, b=30),
                     xaxis=dict(showgrid=False, title='', fixedrange=True),
-                    yaxis=dict(showgrid=True, gridcolor='#2a2e39', title='Enflasyon (%)', side='left', fixedrange=True),
+                    yaxis=dict(showgrid=True, gridcolor='#2a2e39', title='Enflasyon (%)', side='right', fixedrange=True),
                     plot_bgcolor='rgba(0,0,0,0)',
                     paper_bgcolor='rgba(0,0,0,0)',
                     dragmode=False
@@ -775,6 +775,51 @@ Güncel fiyatı görmek için 5 dakikanın ardından sayfayı yenileyebilirsiniz
                 st.plotly_chart(fig_int, use_container_width=True, config={'displayModeBar': False, 'staticPlot': False})
             else:
                 st.info("Faiz verisi Excel'den okunamadı.")
+
+        with col_bond:
+            st.markdown("<h4 style='color: #b0bec5; font-size: 13px; margin-bottom: 5px;'>📜 Devlet Tahvilleri</h4>", unsafe_allow_html=True)
+            
+            @st.cache_data(ttl=3600)
+            def load_isbank_bonds():
+                import requests
+                import re
+                import pandas as pd
+                try:
+                    url = 'https://www.isbank.com.tr/fiyatoran/FiyatTabloGosterV2.asp?trkd=*HZD&tip=HTML'
+                    r = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=5)
+                    r.encoding = 'windows-1254'
+                    
+                    rows = re.findall(r'<tr.*?>(.*?)</tr>', r.text, re.IGNORECASE | re.DOTALL)
+                    data = []
+                    for row in rows:
+                        cols = re.findall(r'<td.*?>(.*?)</td>', row, re.IGNORECASE | re.DOTALL)
+                        cleaned_cols = [re.sub(r'<[^>]+>', '', col).strip() for col in cols]
+                        if cleaned_cols and len(cleaned_cols) > 5:
+                            data.append(cleaned_cols)
+                            
+                    if len(data) > 1:
+                        df = pd.DataFrame(data[1:], columns=data[0])
+                        
+                        # Sadece gösterilmek istenen sütunları alalım (Ekrana sığması için özet görünüm)
+                        keep_cols = []
+                        for c in df.columns:
+                            if "Kodu" in c or "Vade Tarihi" in c or "Sat" in c and "Fiyat" in c or "Sat" in c and "Bileşik" in c:
+                                keep_cols.append(c)
+                        
+                        if keep_cols:
+                            df = df[keep_cols]
+                        
+                        return df
+                except Exception:
+                    pass
+                return None
+                
+            df_bonds = load_isbank_bonds()
+            if df_bonds is not None and not df_bonds.empty:
+                st.dataframe(df_bonds, hide_index=True, height=260, use_container_width=True)
+            else:
+                st.info("Tahvil verileri şu anda çekilemedi.")
+
 
     else:
         st.warning("Hisse verisi çekilemedi. Lütfen piyasa durumunu ve internet bağlantınızı kontrol edin.")

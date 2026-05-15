@@ -8,7 +8,7 @@ This is a professional-grade, interactive stock market dashboard for Pegasus Air
 - **Interactive Charts**: Supports Candlestick and Line charts with smooth interactions.
 - **Technical Indicators**: Accurate moving averages calculated locally.
 - **Fundamental Analysis**: Essential financial metrics (P/E Ratio, P/B Ratio, Market Cap) displayed elegantly.
-
+- **Macroeconomic Indicators**: Tracks Turkish inflation rates, TCMB policy interest rates, and live Treasury Bond yields.
 ## Requirements
 
 - Python 3.8+
