@@ -594,6 +594,272 @@ Güncel fiyatı görmek için 5 dakikanın ardından sayfayı yenileyebilirsiniz
 """
                 st.markdown(info_html, unsafe_allow_html=True)
                 
+        # ─── DHMI Havacılık İstatistikleri ───
+        st.markdown("""
+<div style="margin-top: 35px; margin-bottom: 15px; border-bottom: 1px solid #37474f; padding-bottom: 8px; display: flex; align-items: center; gap: 12px;">
+<span style="font-size: 26px;">✈️</span>
+<div>
+<h3 style="color: #e0e0e0; font-size: 17px; font-weight: bold; margin: 0;">DHMİ Havalimanı Trafik İstatistikleri</h3>
+<span style="color: #78909c; font-size: 12px;">Nisan 2026 Ayı Sonu — Kesin Olmayan Veriler (Kaynak: DHMİ)</span>
+</div>
+</div>
+""", unsafe_allow_html=True)
+
+        @st.cache_data
+        def load_dhmi_data():
+            import pandas as pd
+            try:
+                xl = pd.ExcelFile('data/dhmi_nisan_ayı_sonu.xlsx')
+
+                def parse_sheet(sheet_name):
+                    df = pd.read_excel(xl, sheet_name, header=None)
+                    rows = []
+                    for i, row in df.iterrows():
+                        if i < 3:
+                            continue
+                        name = str(row.iloc[0]).strip()
+                        if not name or name == 'nan':
+                            continue
+                        # Skip footer rows
+                        skip_keywords = ['GENEL', 'TOPLAM', 'OVERFLIGHT', 'TRANS', 'aretli', '(**)', 'denetimli', 'Havalimanlar']
+                        if any(k in name for k in skip_keywords):
+                            continue
+                        try:
+                            total_2025 = float(row.iloc[3])
+                            ic_2026    = float(row.iloc[4])
+                            dis_2026   = float(row.iloc[5])
+                            total_2026 = float(row.iloc[6])
+                            change_pct = float(row.iloc[9])
+                            rows.append({
+                                'Havalimanı': name.replace('(*)', '').strip(),
+                                'İç 2026':    ic_2026,
+                                'Dış 2026':   dis_2026,
+                                'Toplam 2026': total_2026,
+                                'Toplam 2025': total_2025,
+                                'Değişim (%)': change_pct,
+                            })
+                        except Exception:
+                            pass
+                    return pd.DataFrame(rows).sort_values('Toplam 2026', ascending=False)
+
+                def get_totals(sheet_name, total_col=6, change_col=9):
+                    df = pd.read_excel(xl, sheet_name, header=None)
+                    dhmi_row = df[df.iloc[:, 0].astype(str).str.contains('DHMİ TOPLAMI|DHMI TOPLAMI', case=False, na=False)]
+                    tr_row   = df[df.iloc[:, 0].astype(str).str.contains('TÜRKİYE GENELİ|TURKIYE GENEL', case=False, na=False)]
+                    result = {}
+                    if not dhmi_row.empty:
+                        r = dhmi_row.iloc[0]
+                        try:
+                            result['dhmi_2025']   = float(r.iloc[3])
+                            result['dhmi_2026']   = float(r.iloc[total_col])
+                            result['dhmi_change'] = float(r.iloc[change_col])
+                        except Exception:
+                            pass
+                    if not tr_row.empty:
+                        r = tr_row.iloc[0]
+                        try:
+                            result['tr_2025']   = float(r.iloc[3])
+                            result['tr_2026']   = float(r.iloc[total_col])
+                            result['tr_change'] = float(r.iloc[change_col])
+                        except Exception:
+                            pass
+                    return result
+
+                df_yolcu  = parse_sheet('YOLCU')
+                df_ucak   = parse_sheet('TİM UCAK') if 'TİM UCAK' in xl.sheet_names else parse_sheet(xl.sheet_names[0])
+                df_kargo  = parse_sheet('KARGO')
+
+                totals_yolcu = get_totals('YOLCU')
+                totals_ucak  = get_totals(xl.sheet_names[0])
+                totals_kargo = get_totals('KARGO')
+
+                return df_yolcu, df_ucak, df_kargo, totals_yolcu, totals_ucak, totals_kargo
+            except Exception as ex:
+                import traceback
+                print(f"DHMI veri okuma hatası: {ex}\n{traceback.format_exc()}")
+                return None, None, None, {}, {}, {}
+
+        df_yolcu, df_ucak, df_kargo, tot_yolcu, tot_ucak, tot_kargo = load_dhmi_data()
+
+        # ── KPI Kartları ──────────────────────────────────────────────────────────
+        def _fmt_big(v):
+            if v is None:
+                return "—"
+            if abs(v) >= 1_000_000:
+                return f"{v / 1_000_000:.2f} M"
+            if abs(v) >= 1_000:
+                return f"{v / 1_000:.1f} K"
+            return f"{v:,.0f}"
+
+        def _chg_color(v):
+            return "#26a69a" if v >= 0 else "#ef5350"
+
+        def _chg_arrow(v):
+            return "▲" if v >= 0 else "▼"
+
+        dhmi_kpi_html = f"""
+<div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-bottom: 24px;">
+
+  <div style="background: linear-gradient(135deg, #1a2035 0%, #1e2a42 100%); border: 1px solid #29395a; border-radius: 12px; padding: 18px 20px;">
+    <div style="color: #78909c; font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; margin-bottom: 6px;">🧳 DHMİ Yolcu (Nisan 2026)</div>
+    <div style="color: white; font-size: 26px; font-weight: 700; margin-bottom: 4px;">{_fmt_big(tot_yolcu.get('dhmi_2026'))}</div>
+    <div style="color: {_chg_color(tot_yolcu.get('dhmi_change', 0))}; font-size: 13px; font-weight: 600;">
+      {_chg_arrow(tot_yolcu.get('dhmi_change', 0))} {abs(tot_yolcu.get('dhmi_change', 0)):.2f}% &nbsp;<span style="color:#546e7a; font-weight:400;">geçen yıla göre</span>
+    </div>
+    <div style="color:#546e7a; font-size: 11px; margin-top: 6px;">2025: {_fmt_big(tot_yolcu.get('dhmi_2025'))}</div>
+  </div>
+
+  <div style="background: linear-gradient(135deg, #1a2035 0%, #1e2a42 100%); border: 1px solid #29395a; border-radius: 12px; padding: 18px 20px;">
+    <div style="color: #78909c; font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; margin-bottom: 6px;">✈️ DHMİ Toplam Uçak (Nisan 2026)</div>
+    <div style="color: white; font-size: 26px; font-weight: 700; margin-bottom: 4px;">{_fmt_big(tot_ucak.get('dhmi_2026'))}</div>
+    <div style="color: {_chg_color(tot_ucak.get('dhmi_change', 0))}; font-size: 13px; font-weight: 600;">
+      {_chg_arrow(tot_ucak.get('dhmi_change', 0))} {abs(tot_ucak.get('dhmi_change', 0)):.2f}% &nbsp;<span style="color:#546e7a; font-weight:400;">geçen yıla göre</span>
+    </div>
+    <div style="color:#546e7a; font-size: 11px; margin-top: 6px;">2025: {_fmt_big(tot_ucak.get('dhmi_2025'))}</div>
+  </div>
+
+  <div style="background: linear-gradient(135deg, #1a2035 0%, #1e2a42 100%); border: 1px solid #29395a; border-radius: 12px; padding: 18px 20px;">
+    <div style="color: #78909c; font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; margin-bottom: 6px;">📦 DHMİ Kargo / ton (Nisan 2026)</div>
+    <div style="color: white; font-size: 26px; font-weight: 700; margin-bottom: 4px;">{_fmt_big(tot_kargo.get('dhmi_2026'))}</div>
+    <div style="color: {_chg_color(tot_kargo.get('dhmi_change', 0))}; font-size: 13px; font-weight: 600;">
+      {_chg_arrow(tot_kargo.get('dhmi_change', 0))} {abs(tot_kargo.get('dhmi_change', 0)):.2f}% &nbsp;<span style="color:#546e7a; font-weight:400;">geçen yıla göre</span>
+    </div>
+    <div style="color:#546e7a; font-size: 11px; margin-top: 6px;">2025: {_fmt_big(tot_kargo.get('dhmi_2025'))}</div>
+  </div>
+
+</div>
+"""
+        st.markdown(dhmi_kpi_html, unsafe_allow_html=True)
+
+        # ── Grafikler ─────────────────────────────────────────────────────────────
+        col_dhmi1, col_dhmi2 = st.columns(2, gap="large")
+
+        with col_dhmi1:
+            st.markdown("<h4 style='color: #b0bec5; font-size: 13px; margin-bottom: 8px;'>🏆 En Yoğun 10 Havalimanı — Yolcu (Nisan 2026)</h4>", unsafe_allow_html=True)
+            if df_yolcu is not None and not df_yolcu.empty:
+                top10 = df_yolcu.head(10).iloc[::-1]  # Reverse for horizontal bar (en büyük üstte)
+
+                fig_dhmi1 = go.Figure()
+                fig_dhmi1.add_trace(go.Bar(
+                    y=top10['Havalimanı'],
+                    x=top10['İç 2026'],
+                    name='İç Hat',
+                    orientation='h',
+                    marker_color='#1E88E5',
+                    marker_line_width=0,
+                    hovertemplate='<b>%{y}</b><br>İç Hat: %{x:,.0f}<extra></extra>',
+                ))
+                fig_dhmi1.add_trace(go.Bar(
+                    y=top10['Havalimanı'],
+                    x=top10['Dış 2026'],
+                    name='Dış Hat',
+                    orientation='h',
+                    marker_color='#E040FB',
+                    marker_line_width=0,
+                    hovertemplate='<b>%{y}</b><br>Dış Hat: %{x:,.0f}<extra></extra>',
+                ))
+                fig_dhmi1.update_layout(
+                    barmode='stack',
+                    template='plotly_dark',
+                    height=380,
+                    margin=dict(l=0, r=20, t=10, b=0),
+                    legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1, font=dict(size=11)),
+                    xaxis=dict(showgrid=True, gridcolor='#2a2e39', title='', tickformat=',.0f', fixedrange=True),
+                    yaxis=dict(showgrid=False, title='', tickfont=dict(size=10), fixedrange=True),
+                    plot_bgcolor='rgba(0,0,0,0)',
+                    paper_bgcolor='rgba(0,0,0,0)',
+                    dragmode=False,
+                )
+                st.plotly_chart(fig_dhmi1, use_container_width=True, config={'displayModeBar': False})
+            else:
+                st.info("Yolcu verisi okunamadı.")
+
+        with col_dhmi2:
+            st.markdown("<h4 style='color: #b0bec5; font-size: 13px; margin-bottom: 8px;'>📈 Yıllık Değişim (%) — Top 15 Havalimanı Yolcu</h4>", unsafe_allow_html=True)
+            if df_yolcu is not None and not df_yolcu.empty:
+                top15_chg = df_yolcu.head(15).sort_values('Değişim (%)')
+                bar_colors = ['#ef5350' if v < 0 else '#26a69a' for v in top15_chg['Değişim (%)']]
+
+                fig_dhmi2 = go.Figure()
+                fig_dhmi2.add_trace(go.Bar(
+                    y=top15_chg['Havalimanı'],
+                    x=top15_chg['Değişim (%)'],
+                    orientation='h',
+                    marker_color=bar_colors,
+                    marker_line_width=0,
+                    hovertemplate='<b>%{y}</b><br>Değişim: %{x:.2f}%<extra></extra>',
+                ))
+                fig_dhmi2.add_vline(x=0, line_color='#546e7a', line_width=1.2)
+                fig_dhmi2.update_layout(
+                    template='plotly_dark',
+                    height=380,
+                    margin=dict(l=0, r=20, t=10, b=0),
+                    xaxis=dict(showgrid=True, gridcolor='#2a2e39', title='Değişim (%)', fixedrange=True),
+                    yaxis=dict(showgrid=False, title='', tickfont=dict(size=10), fixedrange=True),
+                    plot_bgcolor='rgba(0,0,0,0)',
+                    paper_bgcolor='rgba(0,0,0,0)',
+                    dragmode=False,
+                    showlegend=False,
+                )
+                st.plotly_chart(fig_dhmi2, use_container_width=True, config={'displayModeBar': False})
+            else:
+                st.info("Değişim verisi okunamadı.")
+
+        # ── Kargo değişim grafiği + Yolcu detay tablosu ──────────────────────────
+        col_dhmi3, col_dhmi4 = st.columns(2, gap="large")
+
+        with col_dhmi3:
+            st.markdown("<h4 style='color: #b0bec5; font-size: 13px; margin-bottom: 8px;'>📦 Kargo Değişimi (%) — Top 12 Havalimanı</h4>", unsafe_allow_html=True)
+            if df_kargo is not None and not df_kargo.empty:
+                top12_kargo = df_kargo[df_kargo['Toplam 2026'] > 0].head(12).sort_values('Değişim (%)')
+                kargo_colors = ['#ef5350' if v < 0 else '#26a69a' for v in top12_kargo['Değişim (%)']]
+
+                fig_dhmi3 = go.Figure()
+                fig_dhmi3.add_trace(go.Bar(
+                    y=top12_kargo['Havalimanı'],
+                    x=top12_kargo['Değişim (%)'],
+                    orientation='h',
+                    marker_color=kargo_colors,
+                    marker_line_width=0,
+                    hovertemplate='<b>%{y}</b><br>Kargo Değişim: %{x:.2f}%<extra></extra>',
+                ))
+                fig_dhmi3.add_vline(x=0, line_color='#546e7a', line_width=1.2)
+                fig_dhmi3.update_layout(
+                    template='plotly_dark',
+                    height=350,
+                    margin=dict(l=0, r=20, t=10, b=0),
+                    xaxis=dict(showgrid=True, gridcolor='#2a2e39', title='Değişim (%)', fixedrange=True),
+                    yaxis=dict(showgrid=False, title='', tickfont=dict(size=10), fixedrange=True),
+                    plot_bgcolor='rgba(0,0,0,0)',
+                    paper_bgcolor='rgba(0,0,0,0)',
+                    dragmode=False,
+                    showlegend=False,
+                )
+                st.plotly_chart(fig_dhmi3, use_container_width=True, config={'displayModeBar': False})
+            else:
+                st.info("Kargo verisi okunamadı.")
+
+        with col_dhmi4:
+            st.markdown("<h4 style='color: #b0bec5; font-size: 13px; margin-bottom: 8px;'>📋 Havalimanı Yolcu Detay Tablosu (Top 20)</h4>", unsafe_allow_html=True)
+            if df_yolcu is not None and not df_yolcu.empty:
+                import pandas as pd
+                display_df = df_yolcu.head(20)[['Havalimanı', 'İç 2026', 'Dış 2026', 'Toplam 2026', 'Değişim (%)']].copy()
+                display_df['İç 2026']     = display_df['İç 2026'].apply(lambda x: f"{x:,.0f}")
+                display_df['Dış 2026']    = display_df['Dış 2026'].apply(lambda x: f"{x:,.0f}")
+                display_df['Toplam 2026'] = display_df['Toplam 2026'].apply(lambda x: f"{x:,.0f}")
+                display_df['Değişim (%)'] = display_df['Değişim (%)'].apply(lambda x: f"{'▲' if x >= 0 else '▼'} {abs(x):.2f}%")
+                st.dataframe(display_df, hide_index=True, height=350, use_container_width=True)
+            else:
+                st.info("Tablo verisi okunamadı.")
+
+        st.markdown("""
+<div style="margin-top: 8px; margin-bottom: 25px; display: flex; gap: 8px; align-items: flex-start; color: #78909c; font-size: 11px; font-style: italic; border-top: 1px dashed #37474f; padding-top: 10px;">
+<span style="font-size: 14px; margin-top: 1px;">ℹ️</span>
+<div>Veriler <b>DHMİ (Devlet Hava Meydanları İşletmesi)</b> tarafından yayımlanan <b>Nisan 2026 ayı sonu</b> trafik istatistiklerine dayanmaktadır.
+(*) işaretli havalimanları DHMİ denetimli özel şirket tarafından işletilmekte olup DHMİ toplamına dahil edilmemektedir. Veriler kesin olmayıp revizeye tabidir.</div>
+</div>
+""", unsafe_allow_html=True)
+
         # ─── Makroekonomik Veriler (TCMB Excel Dosyaları) ───
         st.markdown("""
 <div style="margin-top: 25px; margin-bottom: 10px; border-bottom: 1px solid #37474f; padding-bottom: 5px;">
