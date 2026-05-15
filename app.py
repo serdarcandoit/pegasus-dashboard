@@ -601,7 +601,7 @@ Güncel fiyatı görmek için 5 dakikanın ardından sayfayı yenileyebilirsiniz
 </div>
 """, unsafe_allow_html=True)
 
-        col_inf, col_int, col_bond = st.columns(3, gap="large")
+        col_inf, col_int, col_gdp = st.columns(3, gap="large")
         
         with col_inf:
             st.markdown("<h4 style='color: #b0bec5; font-size: 13px; margin-bottom: 5px;'>📈 Enflasyon Oranı (Yıllık, YoY)</h4>", unsafe_allow_html=True)
@@ -776,49 +776,223 @@ Güncel fiyatı görmek için 5 dakikanın ardından sayfayı yenileyebilirsiniz
             else:
                 st.info("Faiz verisi Excel'den okunamadı.")
 
-        with col_bond:
-            st.markdown("<h4 style='color: #b0bec5; font-size: 13px; margin-bottom: 5px;'>📜 Devlet Tahvilleri</h4>", unsafe_allow_html=True)
+        with col_gdp:
+            st.markdown("<h4 style='color: #b0bec5; font-size: 13px; margin-bottom: 5px;'>📊 Türkiye GSYH (World Bank)</h4>", unsafe_allow_html=True)
             
-            @st.cache_data(ttl=3600)
-            def load_isbank_bonds():
-                import requests
-                import re
-                import pandas as pd
+            @st.cache_data
+            def load_gdp_data():
                 try:
-                    url = 'https://www.isbank.com.tr/fiyatoran/FiyatTabloGosterV2.asp?trkd=*HZD&tip=HTML'
-                    r = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=5)
-                    r.encoding = 'windows-1254'
-                    
-                    rows = re.findall(r'<tr.*?>(.*?)</tr>', r.text, re.IGNORECASE | re.DOTALL)
-                    data = []
-                    for row in rows:
-                        cols = re.findall(r'<td.*?>(.*?)</td>', row, re.IGNORECASE | re.DOTALL)
-                        cleaned_cols = [re.sub(r'<[^>]+>', '', col).strip() for col in cols]
-                        if cleaned_cols and len(cleaned_cols) > 5:
-                            data.append(cleaned_cols)
-                            
-                    if len(data) > 1:
-                        df = pd.DataFrame(data[1:], columns=data[0])
-                        
-                        # Sadece gösterilmek istenen sütunları alalım (Ekrana sığması için özet görünüm)
-                        keep_cols = []
-                        for c in df.columns:
-                            if "Kodu" in c or "Vade Tarihi" in c or "Sat" in c and "Fiyat" in c or "Sat" in c and "Bileşik" in c:
-                                keep_cols.append(c)
-                        
-                        if keep_cols:
-                            df = df[keep_cols]
-                        
-                        return df
+                    import pandas as pd
+                    df = pd.read_excel('data/turkey_gdp_worldbank.xls', skiprows=3)
+                    turkey_row = df[df['Country Name'].isin(['Turkiye', 'Turkey', 'Türkiye'])]
+                    if turkey_row.empty:
+                        return None, None
+                    row = turkey_row.iloc[0]
+                    years = []
+                    values = []
+                    for col in df.columns[4:]:
+                        try:
+                            year = int(float(col))
+                            val = row[col]
+                            if pd.notna(val) and val > 0:
+                                years.append(year)
+                                values.append(float(val) / 1e12)  # Trilyon USD
+                        except (ValueError, TypeError):
+                            pass
+                    return years, values
                 except Exception:
-                    pass
-                return None
+                    return None, None
+
+            gdp_years, gdp_values = load_gdp_data()
+            if gdp_years and gdp_values:
+                # Son değer annotation
+                last_year = gdp_years[-1]
+                last_val = gdp_values[-1]
+
+                fig_gdp = go.Figure()
+                fig_gdp.add_trace(go.Scatter(
+                    x=gdp_years,
+                    y=gdp_values,
+                    mode='lines',
+                    line=dict(color='#FFD700', width=2.5, shape='spline'),
+                    fill='tozeroy',
+                    fillcolor='rgba(255, 215, 0, 0.12)',
+                    hovertemplate='<b>%{x}</b>: $%{y:.3f} Trilyon<extra></extra>'
+                ))
+                fig_gdp.add_annotation(
+                    x=last_year, y=last_val,
+                    text=f"${last_val:.2f}T",
+                    showarrow=True,
+                    arrowhead=2,
+                    arrowcolor='#FFD700',
+                    font=dict(color='white', size=11, family='monospace'),
+                    bgcolor='#FFD700',
+                    bordercolor='rgba(0,0,0,0)',
+                    borderwidth=0,
+                    borderpad=5
+                )
+                fig_gdp.update_layout(
+                    template='plotly_dark',
+                    height=320,
+                    margin=dict(l=10, r=50, t=20, b=30),
+                    xaxis=dict(showgrid=False, title='', fixedrange=True),
+                    yaxis=dict(showgrid=True, gridcolor='#2a2e39', title='Trilyon USD', side='right', fixedrange=True),
+                    plot_bgcolor='rgba(0,0,0,0)',
+                    paper_bgcolor='rgba(0,0,0,0)',
+                    dragmode=False
+                )
+                st.plotly_chart(fig_gdp, use_container_width=True, config={'displayModeBar': False, 'staticPlot': False})
+            else:
+                st.info("GSYH verisi okunamadı.")
+
+        # ─── Hazine Bonosu ve Devlet Tahvilleri ───
+        st.markdown("""
+<div style="margin-top: 35px; margin-bottom: 15px; border-bottom: 1px solid #37474f; padding-bottom: 5px;">
+<h3 style="color: #90a4ae; font-size: 16px; font-weight: bold; margin: 0;">📜 Hazine Bonosu ve Devlet Tahvilleri (İş Bankası)</h3>
+</div>
+""", unsafe_allow_html=True)
+
+        @st.cache_data(ttl=3600)
+        def load_isbank_bonds():
+            import requests
+            import re
+            import pandas as pd
+            try:
+                url = 'https://www.isbank.com.tr/fiyatoran/FiyatTabloGosterV2.asp?trkd=*HZD&tip=HTML'
+                r = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=5)
+                r.encoding = 'windows-1254'
                 
-            df_bonds = load_isbank_bonds()
-            if df_bonds is not None and not df_bonds.empty:
-                st.dataframe(df_bonds, hide_index=True, height=260, use_container_width=True)
+                rows = re.findall(r'<tr.*?>(.*?)</tr>', r.text, re.IGNORECASE | re.DOTALL)
+                data = []
+                for row in rows:
+                    cols = re.findall(r'<td.*?>(.*?)</td>', row, re.IGNORECASE | re.DOTALL)
+                    cleaned_cols = [re.sub(r'<[^>]+>', '', col).strip() for col in cols]
+                    if cleaned_cols and len(cleaned_cols) > 5:
+                        data.append(cleaned_cols)
+                        
+                if len(data) > 1:
+                    df = pd.DataFrame(data[1:], columns=data[0])
+                    return df
+            except Exception:
+                pass
+            return None
+
+        col_bond_table, col_yield_curve, col_bond_calc = st.columns(3, gap="large")
+        df_bonds_full = load_isbank_bonds()
+
+        with col_bond_table:
+            st.markdown("<h4 style='color: #b0bec5; font-size: 13px; margin-bottom: 5px;'>📊 Fiyat ve Oran Tablosu</h4>", unsafe_allow_html=True)
+            if df_bonds_full is not None and not df_bonds_full.empty:
+                keep_cols = [c for c in df_bonds_full.columns if "Kodu" in c or "Vade Tarihi" in c or "Sat" in c and "Fiyat" in c or "Sat" in c and "Bileşik" in c]
+                df_bonds_display = df_bonds_full[keep_cols] if keep_cols else df_bonds_full
+                st.dataframe(df_bonds_display, hide_index=True, height=345, use_container_width=True)
             else:
                 st.info("Tahvil verileri şu anda çekilemedi.")
+
+        with col_yield_curve:
+            st.markdown("<h4 style='color: #b0bec5; font-size: 13px; margin-bottom: 5px;'>📈 Getiri Eğrisi (Yield Curve)</h4>", unsafe_allow_html=True)
+            if df_bonds_full is not None and not df_bonds_full.empty:
+                try:
+                    import pandas as pd
+                    vkg_col = next((c for c in df_bonds_full.columns if "V.K.G" in c or "Kalan" in c), None)
+                    yield_col = next((c for c in df_bonds_full.columns if "Sat" in c and "Bileşik" in c and "Faiz" in c), None)
+                    
+                    if vkg_col and yield_col:
+                        df_yc = df_bonds_full[[vkg_col, yield_col]].copy()
+                        df_yc[vkg_col] = pd.to_numeric(df_yc[vkg_col], errors='coerce')
+                        df_yc[yield_col] = pd.to_numeric(df_yc[yield_col], errors='coerce')
+                        df_yc = df_yc.dropna().sort_values(by=vkg_col)
+                        
+                        fig_yc = go.Figure()
+                        fig_yc.add_trace(go.Scatter(
+                            x=df_yc[vkg_col],
+                            y=df_yc[yield_col],
+                            mode='lines+markers',
+                            name='Getiri Eğrisi',
+                            line=dict(color='#E040FB', width=3, shape='spline'),
+                            marker=dict(size=8, color='#E040FB', line=dict(width=1.5, color='#11151C')),
+                            fill='tozeroy',
+                            fillcolor='rgba(224, 64, 251, 0.15)',
+                            hovertemplate='<b>Vadeye Kalan:</b> %{x} Gün<br><b>Faiz:</b> %{y:.2f}%<extra></extra>'
+                        ))
+                        
+                        fig_yc.update_layout(
+                            template='plotly_dark',
+                            height=380,
+                            margin=dict(l=10, r=10, t=20, b=30),
+                            xaxis=dict(showgrid=True, gridcolor='#2a2e39', title='Vadeye Kalan (Gün)', fixedrange=True),
+                            yaxis=dict(showgrid=True, gridcolor='#2a2e39', title='Bileşik Faiz (%)', side='left', fixedrange=True),
+                            plot_bgcolor='rgba(0,0,0,0)',
+                            paper_bgcolor='rgba(0,0,0,0)',
+                            dragmode=False
+                        )
+                        st.plotly_chart(fig_yc, use_container_width=True, config={'displayModeBar': False, 'staticPlot': False})
+                    else:
+                        st.warning("Getiri eğrisi için gerekli kolonlar bulunamadı.")
+                except Exception as e:
+                    st.error(f"Grafik çizilemedi: {e}")
+            else:
+                st.info("Veri bulunamadığı için grafik çizilemiyor.")
+
+        with col_bond_calc:
+            st.markdown("<h4 style='color: #b0bec5; font-size: 13px; margin-bottom: 5px;'>💰 Potansiyel Kar Hesaplama</h4>", unsafe_allow_html=True)
+            if df_bonds_full is not None and not df_bonds_full.empty:
+                vkg_col = next((c for c in df_bonds_full.columns if "V.K.G" in c or "Kalan" in c), None)
+                yield_col = next((c for c in df_bonds_full.columns if "Sat" in c and "Bileşik" in c and "Faiz" in c), None)
+                isin_col = next((c for c in df_bonds_full.columns if "ISIN" in c or "Kodu" in c), None)
+                
+                if vkg_col and yield_col and isin_col:
+                    anapara = st.number_input("Yatırım Tutarı (₺)", min_value=1000, value=100000, step=1000)
+                    
+                    bond_options = {}
+                    for _, row in df_bonds_full.iterrows():
+                        isin = str(row[isin_col]).split('(')[0].strip()
+                        vkg = pd.to_numeric(row[vkg_col], errors='coerce')
+                        faiz = pd.to_numeric(row[yield_col], errors='coerce')
+                        if pd.notna(vkg) and pd.notna(faiz):
+                            bond_options[f"{isin} ({int(vkg)} Gün)"] = {"vkg": vkg, "faiz": faiz}
+                            
+                    if bond_options:
+                        selected_bond = st.selectbox("Tahvil Seçimi", options=list(bond_options.keys()))
+                        selected_data = bond_options[selected_bond]
+                        
+                        vkg = selected_data["vkg"]
+                        faiz = selected_data["faiz"]
+                        
+                        # Yaklaşık faiz formülü (Bileşik): FV = PV * (1 + r/100)^(vkg/365)
+                        vade_sonu_tutar = anapara * ((1 + (faiz / 100)) ** (vkg / 365))
+                        net_kazanc = vade_sonu_tutar - anapara
+                        
+                        st.markdown(f"""
+                        <div style="background-color: #131722; padding: 15px; border-radius: 8px; border: 1px solid #2a2e39; margin-top: 15px;">
+                            <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
+                                <span style="color: #b0bec5; font-size: 13px;">Seçilen Faiz:</span>
+                                <span style="color: #E040FB; font-weight: bold; font-size: 13px;">%{faiz:.2f}</span>
+                            </div>
+                            <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
+                                <span style="color: #b0bec5; font-size: 13px;">Vadeye Kalan:</span>
+                                <span style="color: white; font-weight: bold; font-size: 13px;">{int(vkg)} Gün</span>
+                            </div>
+                            <hr style="border: 0; height: 1px; background: #2a2e39; margin: 10px 0;">
+                            <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
+                                <span style="color: #b0bec5; font-size: 13px;">Tahmini Net Kazanç:</span>
+                                <span style="color: #26a69a; font-weight: bold; font-size: 14px;">+{net_kazanc:,.2f} ₺</span>
+                            </div>
+                            <div style="display: flex; justify-content: space-between;">
+                                <span style="color: #90a4ae; font-size: 14px; font-weight: bold;">Vade Sonu Toplam:</span>
+                                <span style="color: white; font-weight: bold; font-size: 16px;">{vade_sonu_tutar:,.2f} ₺</span>
+                            </div>
+                        </div>
+                        <div style="font-size: 10px; color: #78909c; margin-top: 8px; font-style: italic;">
+                            * Hesaplama brüt oranlar üzerindendir, %10 stopaj kesintisi dahil edilmemiştir.
+                        </div>
+                        """, unsafe_allow_html=True)
+                    else:
+                        st.warning("Hesaplama için uygun tahvil bulunamadı.")
+                else:
+                    st.warning("Gerekli kolonlar bulunamadı.")
+            else:
+                st.info("Veri yok.")
 
 
     else:
