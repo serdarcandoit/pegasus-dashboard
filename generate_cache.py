@@ -203,6 +203,27 @@ def generate_stock_info_cache():
                 last_4 = sorted_dates[-4:]
                 data['quarterly_financials_series'] = {k: all_series[k] for k in last_4}
                 data['quarterly_net_income'] = data['quarterly_financials_series'][last_4[-1]]['net_income']
+
+                # Y/Y Büyümeyi Hesapla (Önceki yılın aynı dönemiyle)
+                try:
+                    last_key = last_4[-1]
+                    last_month = last_key.split('-')[1]
+                    period = int(last_month)
+                    prev_y = int(last_key[:4]) - 1
+                    prev_url = f"https://www.isyatirim.com.tr/_layouts/15/IsYatirim.Website/Common/Data.aspx/MaliTablo?companyCode={code}&exchange=TRY&financialGroup=XI_29&year1={prev_y}&period1={period}&year2={prev_y}&period2=9&year3={prev_y}&period3=6&year4={prev_y}&period4=3"
+                    prev_res = requests.get(prev_url, timeout=5).json()
+                    if 'value' in prev_res and len(prev_res['value']) > 0:
+                        prev_ni_item = next((item for item in prev_res['value'] if item['itemCode'] == '3L'), None)
+                        if prev_ni_item:
+                            period_key = {3: 'value1', 6: 'value2', 9: 'value3', 12: 'value4'}.get(period, 'value4')
+                            prev_val = float(prev_ni_item.get(period_key) or 0)
+                            if prev_val != 0:
+                                growth = (data['quarterly_net_income'] - prev_val) / abs(prev_val)
+                                data['earningsQuarterlyGrowth'] = growth
+                                print(f"    Net Kar Büyümesi Hesaplandı: {growth*100:.2f}%")
+                except Exception as ex:
+                    print(f"    ⚠️ Net Kar Büyümesi hesaplama hatası: {ex}")
+
             print("    İş Yatırım verileri çekildi")
         except Exception as e:
             print(f"    ⚠️ İş Yatırım: {e}")
