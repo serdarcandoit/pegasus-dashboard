@@ -1,10 +1,97 @@
 import streamlit as st
 import yfinance as yf
 import plotly.graph_objects as go
+import pandas as pd
 import time
+import json
+from pathlib import Path
+from datetime import datetime
 
 # Sayfa ayarları
 st.set_page_config(page_title="Pegasus (PGSUS) Dashboard", page_icon="✈️", layout="wide")
+
+# ─── Yerel Önbellek (Cache) Altyapısı ───
+CACHE_DIR = Path("data/cache")
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _json_serializer(obj):
+    """JSON'a çevrilemeyen nesneler için özel serializer."""
+    if hasattr(obj, 'item'):  # numpy scalar → Python scalar
+        val = obj.item()
+        if isinstance(val, float) and val != val:  # NaN
+            return None
+        return val
+    if hasattr(obj, 'isoformat'):  # datetime → string
+        return obj.isoformat()
+    if isinstance(obj, float) and obj != obj:  # NaN → None
+        return None
+    return str(obj)
+
+
+def save_cache(filename, data):
+    """Veriyi yerel JSON dosyasına kaydeder."""
+    try:
+        filepath = CACHE_DIR / filename
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, default=_json_serializer)
+        meta_path = CACHE_DIR / "last_update.txt"
+        meta_path.write_text(datetime.now().strftime("%d/%m/%Y %H:%M"), encoding='utf-8')
+    except Exception as e:
+        print(f"Önbellek kaydetme hatası: {e}")
+
+
+def load_cache(filename):
+    """Yerel JSON önbellek dosyasından veri yükler."""
+    try:
+        filepath = CACHE_DIR / filename
+        if filepath.exists():
+            with open(filepath, 'r', encoding='utf-8') as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return None
+
+
+# ─── Sidebar: Mod Seçimi ───
+with st.sidebar:
+    st.markdown("""
+<div style="text-align: center; margin-bottom: 15px;">
+<span style="font-size: 32px;">✈️</span>
+<h2 style="margin: 5px 0 0 0; font-size: 18px; color: #d1d4dc;">Pegasus Dashboard</h2>
+<span style="font-size: 11px; color: #78909c;">Veri Kontrol Paneli</span>
+</div>
+""", unsafe_allow_html=True)
+    st.markdown("---")
+    offline_mode = st.toggle(
+        "⚡ Hızlı / Çevrimdışı Mod",
+        value=True,
+        help="Aktifken hiçbir API çağrısı yapılmaz, kayıtlı veriler kullanılır. Bulut ortamında önerilir."
+    )
+    if offline_mode:
+        st.caption("🟢 Kayıtlı veriler kullanılıyor — API çağrısı yok")
+    else:
+        st.caption("🔵 Canlı mod — API'lerden veri çekiliyor")
+        if st.button("🔄 Verileri Güncelle ve Kaydet", use_container_width=True):
+            st.cache_data.clear()
+            st.rerun()
+    _meta_path = CACHE_DIR / "last_update.txt"
+    if _meta_path.exists():
+        _last_update = _meta_path.read_text(encoding='utf-8')
+        st.markdown(f"""
+<div style="margin-top: 10px; padding: 8px 12px; background: #1a1e2e; border-radius: 6px; border: 1px solid #2a2e39;">
+<span style="color: #78909c; font-size: 11px;">📅 Son veri güncellemesi:</span><br>
+<span style="color: #d1d4dc; font-size: 12px; font-weight: 600;">{_last_update}</span>
+</div>
+""", unsafe_allow_html=True)
+    st.markdown("---")
+    st.markdown("""
+<div style="padding: 10px; background: linear-gradient(135deg, #1a2035, #1e2a42); border-radius: 8px; border: 1px solid #29395a; font-size: 11px; color: #90a4ae; line-height: 1.5;">
+<b style="color: #d1d4dc;">💡 Nasıl Kullanılır?</b><br><br>
+<b>Bulutta:</b> Hızlı modu açık bırakın.<br>
+<b>Yerelde:</b> Hızlı modu kapatıp "Güncelle" butonuna basarak en güncel verileri çekin ve GitHub'a push edin.
+</div>
+""", unsafe_allow_html=True)
 
 # Borsa İstanbul için hisse sembolü (Yahoo Finance formatı)
 TICKER = "PGSUS.IS"
@@ -41,8 +128,13 @@ def fetch_with_retry(func, max_retries=3, initial_wait=5):
 
 
 @st.cache_data(ttl=300)
-def load_currency_data():
+def load_currency_data(offline_mode=False):
     """Döviz kurları (USD, EUR, GBP → TRY) ve gram altın fiyatını çeker."""
+    # ─── Çevrimdışı Mod: Yerel önbellekten yükle ───
+    if offline_mode:
+        cached = load_cache("currency_data.json")
+        if cached:
+            return cached
     results = {}
 
     # Döviz kurlarını çek
@@ -88,6 +180,9 @@ def load_currency_data():
     except Exception:
         pass
 
+    # Başarılı çekim — önbelleğe kaydet
+    if results:
+        save_cache("currency_data.json", results)
     return results
 
 
@@ -128,10 +223,12 @@ def render_ticker_bar(currency_data):
 
 # ─── Döviz & Altın verisini yükle ve ticker bar'ı göster ───
 try:
-    currency_data = load_currency_data()
+    currency_data = load_currency_data(offline_mode=offline_mode)
     render_ticker_bar(currency_data)
 except Exception:
-    render_ticker_bar({{}})  # Hata durumunda boş göster
+    # Fallback: önbellekten yükle
+    _cached_currency = load_cache("currency_data.json")
+    render_ticker_bar(_cached_currency if _cached_currency else {})
 
 # TradingView Tarzı Kompakt Araç Çubuğu
 col1, col2, _ = st.columns([2, 2, 6])
@@ -163,9 +260,20 @@ with col2:
 
 
 @st.cache_data(ttl=300)  # Fiyat verisi 5 dakika önbellek (rate limit'e takılmamak için artırıldı)
-def load_all_data(ticker, interval):
+def load_all_data(ticker, interval, offline_mode=False):
     """Tek bir fonksiyonla hem grafik verisini hem hareketli ortalamaları çeker.
     Bu sayede Yahoo Finance'e giden istek sayısı minimuma iner."""
+    # ─── Çevrimdışı Mod: Yerel önbellekten yükle ───
+    if offline_mode:
+        cached = load_cache(f"stock_history_{interval}.json")
+        if cached:
+            hist = pd.DataFrame({
+                'Open': cached['open'],
+                'High': cached['high'],
+                'Low': cached['low'],
+                'Close': cached['close'],
+            }, index=pd.to_datetime(cached['index'], utc=True).tz_localize(None))
+            return hist, cached.get('calc_50_ma'), cached.get('calc_200_ma')
     stock = yf.Ticker(ticker)
 
     # 1) Grafik için ana veri
@@ -211,11 +319,28 @@ def load_all_data(ticker, interval):
         except Exception:
             pass  # MA hesaplanamasa da grafik gösterilsin
 
+    # Başarılı çekim — önbelleğe kaydet
+    if not hist.empty:
+        _cache_data = {
+            'index': [str(d) for d in hist.index.tolist()],
+            'open': [float(x) for x in hist['Open'].tolist()],
+            'high': [float(x) for x in hist['High'].tolist()],
+            'low': [float(x) for x in hist['Low'].tolist()],
+            'close': [float(x) for x in hist['Close'].tolist()],
+            'calc_50_ma': float(calc_50_ma) if calc_50_ma is not None else None,
+            'calc_200_ma': float(calc_200_ma) if calc_200_ma is not None else None
+        }
+        save_cache(f"stock_history_{interval}.json", _cache_data)
     return hist, calc_50_ma, calc_200_ma
 
 
 @st.cache_data(ttl=21600)  # Temel analiz verileri yavaş değiştiği için 6 saat önbellek
-def load_info(ticker):
+def load_info(ticker, offline_mode=False):
+    # ─── Çevrimdışı Mod: Yerel önbellekten yükle ───
+    if offline_mode:
+        cached = load_cache("stock_info.json")
+        if cached:
+            return cached
     stock = yf.Ticker(ticker)
     
     def _fetch_info():
@@ -337,13 +462,31 @@ def load_info(ticker):
 
         return data
     
-    return fetch_with_retry(_fetch_info)
+    result = fetch_with_retry(_fetch_info)
+    # Başarılı çekim — önbelleğe kaydet
+    if result:
+        save_cache("stock_info.json", result)
+    return result
 
 
 try:
     with st.spinner("Veriler yükleniyor..."):
-        hist, calc_50_ma, calc_200_ma = load_all_data(TICKER, selected_interval)
-        info = load_info(TICKER)
+        try:
+            hist, calc_50_ma, calc_200_ma = load_all_data(TICKER, selected_interval, offline_mode=offline_mode)
+        except Exception:
+            _cached_hist = load_cache(f"stock_history_{selected_interval}.json")
+            if _cached_hist:
+                hist = pd.DataFrame({
+                    'Open': _cached_hist['open'], 'High': _cached_hist['high'],
+                    'Low': _cached_hist['low'], 'Close': _cached_hist['close'],
+                }, index=pd.to_datetime(_cached_hist['index'], utc=True).tz_localize(None))
+                calc_50_ma, calc_200_ma = _cached_hist.get('calc_50_ma'), _cached_hist.get('calc_200_ma')
+            else:
+                raise
+        try:
+            info = load_info(TICKER, offline_mode=offline_mode)
+        except Exception:
+            info = load_cache("stock_info.json") or {}
     
     if not hist.empty:
         # Son gün kapanış ve bir önceki gün kapanış fiyatlarını al
@@ -1144,7 +1287,25 @@ Güncel fiyatı görmek için 5 dakikanın ardından sayfayı yenileyebilirsiniz
             return None
 
         col_bond_table, col_yield_curve, col_bond_calc = st.columns(3, gap="large")
-        df_bonds_full = load_isbank_bonds()
+        if offline_mode:
+            _cached_bonds = load_cache("isbank_bonds.json")
+            if _cached_bonds and 'data' in _cached_bonds and 'columns' in _cached_bonds:
+                df_bonds_full = pd.DataFrame(_cached_bonds['data'], columns=_cached_bonds['columns'])
+            else:
+                df_bonds_full = load_isbank_bonds()
+                if df_bonds_full is not None and not df_bonds_full.empty:
+                    save_cache("isbank_bonds.json", {'columns': df_bonds_full.columns.tolist(), 'data': df_bonds_full.values.tolist()})
+        else:
+            try:
+                df_bonds_full = load_isbank_bonds()
+                if df_bonds_full is not None and not df_bonds_full.empty:
+                    save_cache("isbank_bonds.json", {'columns': df_bonds_full.columns.tolist(), 'data': df_bonds_full.values.tolist()})
+            except Exception:
+                _cached_bonds = load_cache("isbank_bonds.json")
+                if _cached_bonds and 'data' in _cached_bonds:
+                    df_bonds_full = pd.DataFrame(_cached_bonds['data'], columns=_cached_bonds['columns'])
+                else:
+                    df_bonds_full = None
 
         with col_bond_table:
             st.markdown("<h4 style='color: #b0bec5; font-size: 13px; margin-bottom: 5px;'>📊 Fiyat ve Oran Tablosu</h4>", unsafe_allow_html=True)
